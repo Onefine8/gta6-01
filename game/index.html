@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Palmetto Bay Heat — Open-World Crime Game</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1526; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #touch { display: none; }
+  @media (pointer: coarse) {
+    #touch { display: block; position: fixed; inset: auto 0 0 0; pointer-events: none; z-index: 5; }
+    #touch button {
+      pointer-events: auto; position: absolute; width: 64px; height: 64px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.6); background: rgba(12,16,24,0.55); color: #fff;
+      font: bold 22px system-ui, sans-serif; touch-action: none;
+    }
+    #touch .up { left: 84px; bottom: 150px; }
+    #touch .down { left: 84px; bottom: 70px; }
+    #touch .left { left: 8px; bottom: 110px; }
+    #touch .right { left: 160px; bottom: 110px; }
+    #touch .enter { right: 16px; bottom: 110px; background: rgba(242,201,76,0.7); color: #10141b; }
+    #touch .punch { right: 96px; bottom: 70px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Palmetto Bay Heat: an open-world crime game. Explore the city on foot or by car, take missions, and outrun the police."></canvas>
+<p id="status" role="status" aria-live="polite"></p>
+<div id="touch" aria-hidden="true">
+  <button class="up" data-touch="up" type="button">▲</button>
+  <button class="down" data-touch="down" type="button">▼</button>
+  <button class="left" data-touch="left" type="button">◀</button>
+  <button class="right" data-touch="right" type="button">▶</button>
+  <button class="enter" data-touch="enter" type="button">E</button>
+  <button class="punch" data-touch="punch" type="button">Q</button>
+</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
