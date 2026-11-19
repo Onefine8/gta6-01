@@ -60,6 +60,19 @@ export const TAXI = {
   nearMissBonus: 25,
 };
 
+// Downtown Heist (mission 5): the vault under the Downtown bank. The drill
+// needs seconds on site, the alarm brings the whole precinct, and a fast,
+// clean getaway pays a bonus on top of the take.
+export const HEIST = {
+  vaultX: 2400,
+  vaultY: 1000,
+  vaultRadius: 70,
+  crackSeconds: 12,
+  alarmStars: 2,
+  cleanBonus: 500,
+  cleanBonusSeconds: 60,
+};
+
 export const CAR = {
   length: 54,
   width: 26,

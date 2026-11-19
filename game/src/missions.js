@@ -2,6 +2,8 @@
 // state machine: an intro line, a chain of objectives (go here, do that), a reward,
 // and a fail condition. Side activities — the street race and the hidden packages —
 // live here too, so the main loop only asks: what is the current objective?
+import { HEIST } from './config.js';
+import { addWanted } from './police.js';
 export const MISSION_DEFS = [
   {
     id: 1,
@@ -55,6 +57,21 @@ export const MISSION_DEFS = [
       { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
     ],
   },
+  {
+    id: 5,
+    title: 'Downtown Heist',
+    giver: 'Dante',
+    intro: 'Dante: "The real score, Rico — the Downtown bank vault. Get inside, hold the drill on the vault till it pops, grab the bags, then vanish before the precinct boxes you in. This one pays like nothing else."',
+    reward: 3500,
+    failText: 'The vault job blew up. Dante is done with you.',
+    timeLimit: 240,
+    steps: [
+      { kind: 'goto', text: 'Reach the Downtown bank on 5th Avenue', x: HEIST.vaultX, y: HEIST.vaultY, radius: 110 },
+      { kind: 'crack', text: 'Crack the vault — stay inside while the drill works', x: HEIST.vaultX, y: HEIST.vaultY, radius: HEIST.vaultRadius, seconds: HEIST.crackSeconds, alarmStars: HEIST.alarmStars },
+      { kind: 'goto', text: 'Grab the cash bags at the vault door', x: 2520, y: 1120, radius: 80 },
+      { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
+    ],
+  },
 ];
 
 export const RACE = {
@@ -98,6 +115,10 @@ export function createMissionState() {
     packagesFound: 0,
     message: '',
     messageTimer: 0,
+    // Vault-cracking progress for mission 5: the drill only works while Rico
+    // stays inside the vault ring, and the alarm goes off exactly once.
+    crackTimer: 0,
+    crackArmed: false,
   };
 }
 
@@ -111,6 +132,8 @@ export function startMission(missions, index) {
   missions.introText = def.intro;
   missions.introTimer = 6;
   missions.timer = def.timeLimit || 0;
+  missions.crackTimer = 0;
+  missions.crackArmed = false;
   missions.message = `${def.title} — ${def.giver}`;
   missions.messageTimer = 4;
   return def;
@@ -129,6 +152,15 @@ export function objectiveText(missions) {
   }
   const step = currentStep(missions);
   return step ? step.text : '';
+}
+
+// Vault-drill progress, 0 to 1, while the current step is a crack step;
+// null the rest of the time, so the HUD only draws the bar when it matters.
+export function crackProgress(missions) {
+  if (!missions.active) return null;
+  const step = currentStep(missions);
+  if (!step || step.kind !== 'crack') return null;
+  return Math.max(0, Math.min(1, missions.crackTimer / (step.seconds || 12)));
 }
 
 export function showMessage(missions, text, seconds) {
@@ -171,6 +203,28 @@ export function stepMissions(missions, state, dt, events) {
       if (missions.step >= def.steps.length) completeMission(missions, state, def);
       else showMessage(missions, 'Objective done — next stop marked.', 3);
     }
+  } else if (step.kind === 'crack') {
+    // Vault cracking: the drill only bites while Rico stays in the ring.
+    // Stepping out lets the drill cool — progress decays, it does not reset.
+    // The alarm trips the first moment the drill starts, and it brings heat.
+    if (!missions.crackArmed) {
+      missions.crackArmed = true;
+      missions.crackTimer = 0;
+      addWanted(state, step.alarmStars || 2);
+      showMessage(missions, 'ALARM! The vault drill is loud — police are coming. Hold the ring!', 4);
+    }
+    const d = Math.hypot(px - step.x, py - step.y);
+    if (d < step.radius) {
+      missions.crackTimer += dt;
+      if (missions.crackTimer >= (step.seconds || 12)) {
+        missions.step += 1;
+        missions.crackTimer = 0;
+        showMessage(missions, 'Vault popped! Grab the cash bags and run.', 3);
+      }
+    } else {
+      missions.crackTimer = Math.max(0, missions.crackTimer - dt * 0.5);
+      if (missions.crackTimer <= 0) showMessage(missions, 'Get back in the vault ring — the drill is stalling!', 2);
+    }
   } else if (step.kind === 'escape') {
     if (state.wanted === 0) {
       missions.step += 1;
@@ -192,8 +246,11 @@ export function completeMission(missions, state, def) {
   missions.done = true;
   missions.index += 1;
   let reward = def.reward;
-  // Mission 1 pays a clean-delivery bonus when the coupe arrives unscratched.
-  if (def.id === 1 && state.player.inCar && state.player.inCar.health >= 80) {
+  // Mission 5 pays a clean-getaway bonus when the clock still has a minute on it.
+  if (def.id === 5 && missions.timer > HEIST.cleanBonusSeconds) {
+    reward += HEIST.cleanBonus;
+    showMessage(missions, `${def.title} complete! +$${reward} (includes $${HEIST.cleanBonus} clean-getaway bonus)`, 5);
+  } else if (def.id === 1 && state.player.inCar && state.player.inCar.health >= 80) {
     reward += 100;
     showMessage(missions, `${def.title} complete! +$${reward} (includes $100 clean-delivery bonus)`, 5);
   } else {

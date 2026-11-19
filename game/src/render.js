@@ -3,6 +3,8 @@
 // paints a 1280 x 720 window of it, scaled to the browser window.
 import { CITY, FIELD, FONT, PALETTE, TITLE_FONT, WORLD } from './config.js';
 import { drawHud } from './hud.js';
+import { MISSION_DEFS } from './missions.js';
+import { STREET_RACE_TRACKS } from './races.js';
 import { onBeach, inWater, roadXs, roadYs } from './world.js';
 
 export const SCREEN_TITLE = 'title';
@@ -320,9 +322,9 @@ export function createRenderer(canvas) {
     text('An open-world crime story — steal, drive, race, and outrun the law.', FIELD.width / 2, 168, 20, '#e2e8f0', 'center');
     const lines = [
       'WASD / Arrows — move & drive    E — enter / exit car    Q — punch    C — horn',
-      'M — story mission (4)    R — street race    T — taxi fare    G — repair / heal',
+      'M — story mission (5)    R — street race (3 circuits)    T — taxi fare    G — repair / heal',
       'Mouse wheel — zoom camera    H — help    P — pause    N — mute',
-      `Missions done: ${state.missionsDone}   Packages: ${state.missions.packagesFound}/${12}   Best race: ${state.missions.race.best ? state.missions.race.best.toFixed(1) + 's' : '—'}   Taxi fares: ${state.stats ? state.stats.taxis || 0 : 0}`,
+      `Missions done: ${state.missionsDone}   Packages: ${state.missions.packagesFound}/${12}   Best race: ${state.missions.race.best ? state.missions.race.best.toFixed(1) + 's' : '—'}   Street-race wins: ${state.streetRace ? state.streetRace.wins : 0}   Taxi fares: ${state.stats ? state.stats.taxis || 0 : 0}`,
       'Save: progress is kept in this browser automatically.',
     ];
     drawPanel(' ', lines, 'Press Space or click to start');
@@ -407,6 +409,37 @@ export function createRenderer(canvas) {
       context.textAlign = 'center';
       context.fillText(`${state.missions.race.checkpoint + 1}`, cp.x, cp.y + 9);
       context.textAlign = 'left';
+    }
+    // Street-race checkpoints (magenta ring) and the rival drivers racing them.
+    if (state.streetRace && state.streetRace.active) {
+      const track = state.streetRace.trackIndex >= 0 ? STREET_RACE_TRACKS[state.streetRace.trackIndex] : null;
+      if (track) {
+        const cp = track.checkpoints[state.streetRace.checkpoint];
+        context.fillStyle = 'rgba(232,121,249,0.45)';
+        context.beginPath(); context.arc(cp.x, cp.y, 46, 0, Math.PI * 2); context.fill();
+        context.fillStyle = '#e879f9';
+        context.font = `bold 26px ${FONT}`;
+        context.textAlign = 'center';
+        context.fillText(`${state.streetRace.checkpoint + 1}`, cp.x, cp.y + 9);
+        context.textAlign = 'left';
+      }
+      for (const rival of state.streetRace.rivals) drawCarShape(rival, false);
+    }
+    // The Downtown bank vault: an orange ring while mission 5 is cracking it.
+    if (state.missions.active && state.missions.index === 4) {
+      const step = MISSION_DEFS[4].steps[state.missions.step];
+      if (step && step.kind === 'crack') {
+        context.fillStyle = 'rgba(249,115,22,0.4)';
+        context.beginPath(); context.arc(step.x, step.y, step.radius, 0, Math.PI * 2); context.fill();
+        context.strokeStyle = '#f97316';
+        context.lineWidth = 3;
+        context.beginPath(); context.arc(step.x, step.y, step.radius, 0, Math.PI * 2); context.stroke();
+        context.fillStyle = '#fff';
+        context.font = `bold 13px ${FONT}`;
+        context.textAlign = 'center';
+        context.fillText('VAULT', step.x, step.y - step.radius - 8);
+        context.textAlign = 'left';
+      }
     }
     drawObjective(state);
     for (const car of state.parkedCars) drawCarShape(car, false);
