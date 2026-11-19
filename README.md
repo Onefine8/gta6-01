@@ -11,15 +11,22 @@ a park, a beach and a harbour. Explore on foot or steal any parked car and
 drive it: traffic, pedestrians, police cruisers and a wanted level that
 follows you everywhere.
 
-- **Story missions (4):** "Wheels Up" (steal the Sunset Coupe for Marina),
+- **Story missions (5):** "Wheels Up" (steal the Sunset Coupe for Marina),
   "Bayfront Dash" (three timed drops across the city), "Heat Wave" (lose
-  the police, then meet Dante at the park) and "Harbor Heist" (steal the
-  Harbor Van, deliver it to Lighthouse Point, then vanish). Each has an
-  intro, a fail condition and a cash reward; a clean delivery in mission 1
-  pays a $100 bonus.
+  the police, then meet Dante at the park), "Harbor Heist" (steal the
+  Harbor Van, deliver it to Lighthouse Point, then vanish) and "Downtown
+  Heist" (reach the Downtown bank, crack the vault by standing in the gold
+  ring while the alarm climbs, grab the cash and lose the heat — $3,500,
+  plus a $500 bonus for a quiet job). Each has an intro, a fail condition
+  and a cash reward; a clean delivery in mission 1 pays a $100 bonus.
+- **Street racing:** three circuits — Marina Loop ($100 entry), Downtown
+  Dash ($200) and Beachfront Sprint ($300) — each with its own checkered
+  start flag and a best time. Press R at a flag to enter: three AI rivals
+  (Vex, Marisol, Turbo Tommy) line up behind you and drive the same
+  checkpoints. Win the race for $800; the entry fee is lost if you quit,
+  wreck or get busted.
 - **Open world:** driveable stolen cars with handling, collisions and
   damage; traffic and pedestrians; 12 hidden packages to collect; a
-  timed street race (Palmetto GP) with checkpoints and a best lap; a
   repeatable taxi job (pick up fares, get paid by distance); near-miss
   bonuses for flashing past traffic at speed.
 - **Wanted system:** 0–5 stars. Steal a car, hit a pedestrian or punch

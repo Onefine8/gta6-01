@@ -1,373 +1,343 @@
-// Street racing for Palmetto Bay Heat. Three illegal circuits run after dark:
-// pay an entry fee at the start line, beat three rival drivers over the
-// checkpoints, and take the prize. Rivals are real cars on the road — they
-// steer for the next checkpoint, rubber-band a little so a race is never
-// decided on the first corner, and finish on their own clock. The player
-// keeps racing on foot if they bail out of the car, just much more slowly.
+// Street racing for Palmetto Bay Heat: three circuits around the city, three
+// AI rivals who actually drive the course, an entry fee per circuit, an $800
+// prize for the winner, and a best time kept separately for each circuit.
+//
+// A race is a state machine owned by the main loop: it starts at a checkered
+// flag (press R near one), runs while Rico stays in his car, and ends when he
+// crosses the last checkpoint. Rivals follow the same checkpoints with their
+// own speed and skill, so the player has to beat them, not just the clock.
 import { WORLD } from './config.js';
-import { clampToWorld } from './world.js';
+import { clampToWorld, collideBuildings } from './world.js';
 
-export const STREET_RACE_CHECKPOINT_RADIUS = 110;
+export const RACE_PRIZE = 800;
+export const RACE_CHECKPOINT_RADIUS = 120;
+export const RACE_START_RADIUS = 160;
 
-// Every track starts at its first checkpoint. Drive up to a start line in a
-// car and press R — the track whose start you are standing on is the one
-// you enter. Laps run the checkpoint loop again from the top.
-export const STREET_RACE_TRACKS = [
+// The three circuits. Each one is a loop of checkpoints on the road grid;
+// the start flag is where Rico parks and presses R to enter.
+export const RACE_CIRCUITS = [
   {
-    id: 'bay-loop',
-    name: 'Bay Loop',
-    blurb: 'One lap around the whole city grid. Fast, simple, honest.',
+    id: 0,
+    name: 'Marina Loop',
     entryFee: 100,
-    prize: 800,
-    laps: 1,
+    start: { x: 600, y: 200, angle: 0 },
     checkpoints: [
-      { x: 2200, y: 600 },
-      { x: 2800, y: 400 },
-      { x: 2800, y: 2000 },
-      { x: 400, y: 2000 },
-      { x: 400, y: 400 },
-    ],
-  },
-  {
-    id: 'downtown-sprint',
-    name: 'Downtown Sprint',
-    blurb: 'Two tight laps through Downtown. Short straights, hard braking.',
-    entryFee: 250,
-    prize: 2000,
-    laps: 2,
-    checkpoints: [
-      { x: 2000, y: 800 },
-      { x: 2800, y: 800 },
+      { x: 2800, y: 200 },
       { x: 2800, y: 1600 },
-      { x: 2000, y: 1600 },
+      { x: 400, y: 1600 },
+      { x: 400, y: 200 },
     ],
   },
   {
-    id: 'beachfront-circuit',
-    name: 'Beachfront Circuit',
-    blurb: 'Two long laps down to the beach and back. Top speed wins here.',
-    entryFee: 400,
-    prize: 3500,
-    laps: 2,
+    id: 1,
+    name: 'Downtown Dash',
+    entryFee: 200,
+    start: { x: 2000, y: 1200, angle: 0 },
     checkpoints: [
-      { x: 400, y: 2000 },
-      { x: 1600, y: 2000 },
-      { x: 2800, y: 2000 },
       { x: 2800, y: 1200 },
-      { x: 400, y: 1200 },
+      { x: 2800, y: 400 },
+      { x: 2000, y: 400 },
+      { x: 2000, y: 1200 },
+    ],
+  },
+  {
+    id: 2,
+    name: 'Beachfront Sprint',
+    entryFee: 300,
+    start: { x: 400, y: 2000, angle: 0 },
+    checkpoints: [
+      { x: 2800, y: 2000 },
+      { x: 2800, y: 1600 },
+      { x: 400, y: 1600 },
+      { x: 400, y: 2000 },
     ],
   },
 ];
 
-// The three regulars on the scene. Each has a skill level that sets their
-// top speed and how cleanly they take corners.
-export const RIVAL_DRIVERS = [
-  { name: 'Vex', color: '#c65df0', model: 'Neon GT', skill: 0.94 },
-  { name: 'Luna', color: '#38bdf8', model: 'Sunset Roadster', skill: 0.88 },
-  { name: 'Turbo Tommy', color: '#fb923c', model: 'Bay Runner', skill: 0.8 },
+// The regulars at the start line. Faster rivals also drive cleaner lines;
+// the slowest one is cheap to beat, the fastest one is a real fight.
+export const RACE_RIVALS = [
+  { name: 'Vex', color: '#c65df0', topSpeed: 460, skill: 0.92 },
+  { name: 'Marisol', color: '#3f8fe8', topSpeed: 500, skill: 0.97 },
+  { name: 'Turbo Tommy', color: '#e8533f', topSpeed: 535, skill: 1.0 },
 ];
 
-export function createStreetRaceState() {
+export function createRaceState() {
   return {
     active: false,
-    trackIndex: -1,
-    lap: 1,
+    circuitIndex: 0,
     checkpoint: 0,
     timer: 0,
+    // Best finish time per circuit, in seconds; null means never finished.
+    best: [null, null, null],
     rivals: [],
-    position: 4,
-    finished: false,
-    entryFeePaid: 0,
-    best: {},
+    playerPlace: 0,
     wins: 0,
-    racesRun: 0,
   };
 }
 
-// Which track start line is this spot standing on, if any? -1 means none.
-export function trackAtStart(x, y) {
-  for (let i = 0; i < STREET_RACE_TRACKS.length; i += 1) {
-    const start = STREET_RACE_TRACKS[i].checkpoints[0];
-    if (Math.hypot(x - start.x, y - start.y) < 170) return i;
+// The circuit whose start flag is closest to (x, y), or -1 when Rico is not
+// near any start line.
+export function nearestCircuit(x, y, maxDist) {
+  const limit = maxDist === undefined ? RACE_START_RADIUS : maxDist;
+  let found = -1;
+  let foundD = limit;
+  for (let i = 0; i < RACE_CIRCUITS.length; i += 1) {
+    const s = RACE_CIRCUITS[i].start;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < foundD) { foundD = d; found = i; }
   }
-  return -1;
+  return found;
 }
 
-function angleDiff(target, current) {
-  let diff = target - current;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  return diff;
+export function currentRaceCheckpoint(race) {
+  if (!race.active) return null;
+  const circuit = RACE_CIRCUITS[race.circuitIndex];
+  if (!circuit) return null;
+  return circuit.checkpoints[race.checkpoint] || null;
 }
 
-function spawnRivals(race, track, random) {
-  const start = track.checkpoints[0];
-  const next = track.checkpoints[1];
-  const baseAngle = Math.atan2(next.y - start.y, next.x - start.x);
-  // Rivals line up behind the start line, staggered left and right so they
-  // do not spawn inside each other or inside the player's car.
-  const backX = Math.cos(baseAngle);
-  const backY = Math.sin(baseAngle);
-  const sideX = Math.cos(baseAngle + Math.PI / 2);
-  const sideY = Math.sin(baseAngle + Math.PI / 2);
-  return RIVAL_DRIVERS.map((driver, i) => {
-    const row = Math.floor(i / 2) + 1;
-    const side = i % 2 === 0 ? -1 : 1;
-    const jitter = (random() - 0.5) * 0.06;
-    return {
-      id: 2000 + i,
-      name: driver.name,
-      color: driver.color,
-      model: driver.model,
-      x: start.x - backX * (70 + row * 62) + sideX * side * 34,
-      y: start.y - backY * (70 + row * 62) + sideY * side * 34,
-      angle: baseAngle + jitter,
+export function formatRaceTime(t) {
+  if (t === null || t === undefined) return '—';
+  return `${t.toFixed(1)}s`;
+}
+
+function ordinal(n) {
+  if (n === 1) return '1st';
+  if (n === 2) return '2nd';
+  if (n === 3) return '3rd';
+  return `${n}th`;
+}
+
+// Where Rico sits right now: rivals ahead of him on the course count against
+// him, rivals behind do not.
+export function racePosition(race) {
+  let ahead = 0;
+  for (const rival of race.rivals) {
+    if (rival.finished) ahead += 1;
+    else if (rival.checkpoint > race.checkpoint) ahead += 1;
+  }
+  return ahead + 1;
+}
+
+export function racePositionText(race) {
+  return `${ordinal(racePosition(race))} of ${race.rivals.length + 1}`;
+}
+
+// A short message on the mission toast line, if the state carries one.
+function tell(state, text, seconds) {
+  if (state.missions) {
+    state.missions.message = text;
+    state.missions.messageTimer = seconds || 3;
+  }
+}
+
+// Why Rico cannot enter this circuit right now, or null when he can.
+export function canStartRace(state, circuitIndex) {
+  const race = state.race;
+  const circuit = RACE_CIRCUITS[circuitIndex];
+  if (!circuit) return 'There is no circuit here.';
+  if (race.active) return 'You are already in a race — finish it first.';
+  if (!state.player.inCar) return 'You need a car to race — steal one first (E).';
+  if (state.player.money < circuit.entryFee) {
+    return `${circuit.name} entry is $${circuit.entryFee} — you only have $${state.player.money}.`;
+  }
+  return null;
+}
+
+// Line the rivals up behind the start flag, staggered so they do not start
+// inside each other, all facing down the first straight.
+function spawnRivals(race, circuit, random) {
+  const rivals = [];
+  const a = circuit.start.angle;
+  const sideX = Math.cos(a + Math.PI / 2);
+  const sideY = Math.sin(a + Math.PI / 2);
+  for (let i = 0; i < RACE_RIVALS.length; i += 1) {
+    const def = RACE_RIVALS[i];
+    const back = 52 + i * 58;
+    const lateral = (i % 2 === 0 ? -1 : 1) * 30;
+    const wobble = random ? (random() - 0.5) * 12 : 0;
+    rivals.push({
+      name: def.name,
+      color: def.color,
+      topSpeed: def.topSpeed,
+      skill: def.skill,
+      x: circuit.start.x - Math.cos(a) * back + sideX * (lateral + wobble),
+      y: circuit.start.y - Math.sin(a) * back + sideY * (lateral + wobble),
+      angle: a,
       speed: 0,
-      topSpeed: Math.round((430 + random() * 60) * driver.skill),
-      health: 100,
-      parked: false,
-      driver: 'rival',
-      stolen: false,
+      backup: 0,
       checkpoint: 0,
-      lap: 1,
       finished: false,
-      finishTime: 0,
-      launchDelay: 0.5 + i * 0.25,
-      turnSkill: 1.9 + driver.skill * 0.7,
-    };
-  });
+      finishTime: null,
+      place: 0,
+    });
+  }
+  race.rivals = rivals;
 }
 
-export function startStreetRace(race, state, trackIndex, random) {
-  const track = STREET_RACE_TRACKS[trackIndex];
-  if (!track) return false;
-  if (race.active) return false;
-  if (state.missions.race.active) {
-    state.missions.message = 'Finish the Palmetto GP first — one race at a time.';
-    state.missions.messageTimer = 3;
+export function startRace(race, state, circuitIndex, random) {
+  const circuit = RACE_CIRCUITS[circuitIndex];
+  const whyNot = canStartRace(state, circuitIndex);
+  if (whyNot) {
+    tell(state, whyNot, 4);
     return false;
   }
-  if (!state.player.inCar) {
-    state.missions.message = 'You need a car to race — steal one first.';
-    state.missions.messageTimer = 3;
-    return false;
-  }
-  if (state.player.money < track.entryFee) {
-    state.missions.message = `${track.name} entry is $${track.entryFee} — you are $${track.entryFee - state.player.money} short.`;
-    state.missions.messageTimer = 4;
-    return false;
-  }
-  state.player.money -= track.entryFee;
+  state.player.money -= circuit.entryFee;
   race.active = true;
-  race.trackIndex = trackIndex;
-  race.lap = 1;
+  race.circuitIndex = circuitIndex;
   race.checkpoint = 0;
   race.timer = 0;
-  race.position = 4;
-  race.finished = false;
-  race.entryFeePaid = track.entryFee;
-  race.rivals = spawnRivals(race, track, random);
-  race.racesRun += 1;
-  state.stats.streetRaces = (state.stats.streetRaces || 0) + 1;
-  state.missions.message = `${track.name} — $${track.entryFee} in, $${track.prize} to the winner. ${track.laps} lap${track.laps > 1 ? 's' : ''}, ${track.checkpoints.length} checkpoints. GO!`;
-  state.missions.messageTimer = 5;
+  race.playerPlace = 0;
+  spawnRivals(race, circuit, random);
+  tell(state, `${circuit.name} — entry $${circuit.entryFee}. Beat ${RACE_RIVALS.map((r) => r.name).join(', ')} to the flag for $${RACE_PRIZE}!`, 5);
   return true;
 }
 
-export function cancelStreetRace(race, state, reason) {
-  if (!race.active) return;
-  race.active = false;
-  race.rivals = [];
-  if (reason) {
-    state.missions.message = reason;
-    state.missions.messageTimer = 4;
-  }
-}
-
-// A racer's progress score: laps first, then checkpoints, then closeness to
-// the next checkpoint. A finished racer outranks everyone still driving,
-// ordered by finish time.
-function progressScore(racer, track, isPlayer, playerPos) {
-  if (racer.finished) return 100000000 - racer.finishTime * 100;
-  const cp = track.checkpoints[racer.checkpoint];
-  const px = isPlayer ? playerPos.x : racer.x;
-  const py = isPlayer ? playerPos.y : racer.y;
-  const dist = Math.hypot(px - cp.x, py - cp.y);
-  return racer.lap * 100000 + racer.checkpoint * 10000 - dist;
-}
-
-function currentPosition(race, state, track) {
-  const playerCar = state.player.inCar;
-  const px = playerCar ? playerCar.x : state.player.x;
-  const py = playerCar ? playerCar.y : state.player.y;
-  const playerRacer = {
-    lap: race.lap,
-    checkpoint: race.checkpoint,
-    finished: race.finished,
-    finishTime: race.timer,
-  };
-  const playerScore = progressScore(playerRacer, track, true, { x: px, y: py });
-  let place = 1;
-  for (const rival of race.rivals) {
-    if (progressScore(rival, track, false) > playerScore) place += 1;
-  }
-  return place;
-}
-
-function stepRival(rival, track, dt, playerScore, random) {
-  if (rival.finished) {
-    rival.speed = Math.max(0, rival.speed - 200 * dt);
+function stepRival(rival, race, state, dt, random) {
+  if (rival.finished) return;
+  const circuit = RACE_CIRCUITS[race.circuitIndex];
+  const target = circuit.checkpoints[rival.checkpoint];
+  if (!target) return;
+  // Unstick: after ramming a building, back straight out for a moment
+  // instead of grinding against the wall at full throttle.
+  if (rival.backup > 0) {
+    rival.backup -= dt;
+    rival.speed = -150;
     rival.x += Math.cos(rival.angle) * rival.speed * dt;
     rival.y += Math.sin(rival.angle) * rival.speed * dt;
     return;
   }
-  if (rival.launchDelay > 0) {
-    rival.launchDelay -= dt;
-    return;
+  const dx = target.x - rival.x;
+  const dy = target.y - rival.y;
+  const dist = Math.hypot(dx, dy);
+  const wantAngle = Math.atan2(dy, dx);
+  let diff = wantAngle - rival.angle;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  // Sharp turns bleed speed, so a rival that overshoots a corner pays for it.
+  const turnSharpness = Math.abs(diff);
+  rival.angle += Math.max(-2.4 * dt, Math.min(2.4 * dt, diff));
+  let targetSpeed = rival.topSpeed * (0.9 + 0.1 * rival.skill);
+  if (turnSharpness > 0.7) targetSpeed *= 0.55;
+  else if (turnSharpness > 0.3) targetSpeed *= 0.8;
+  // Brake for the corner after this checkpoint: a 90-degree turn at full
+  // speed throws the car off the road and into the buildings.
+  const nextCp = circuit.checkpoints[rival.checkpoint + 1];
+  if (nextCp && dist < 500) {
+    const outAngle = Math.atan2(nextCp.y - target.y, nextCp.x - target.x);
+    let corner = Math.abs(outAngle - wantAngle);
+    while (corner > Math.PI) corner = Math.abs(corner - Math.PI * 2);
+    if (corner > 0.5) targetSpeed = Math.min(targetSpeed, 210);
   }
-  const target = track.checkpoints[rival.checkpoint];
-  const dist = Math.hypot(target.x - rival.x, target.y - rival.y);
-  if (dist < STREET_RACE_CHECKPOINT_RADIUS) {
+  // Rubber band: a rival a full checkpoint ahead eases off, one behind
+  // pushes harder, so races stay close instead of being decided at the start.
+  if (rival.checkpoint > race.checkpoint + 0) targetSpeed *= 0.94;
+  if (rival.checkpoint < race.checkpoint) targetSpeed *= 1.07;
+  // A little wobble in the line, so rivals do not drive like slot cars.
+  const wobble = random ? (random() - 0.5) * 0.5 * dt : 0;
+  rival.angle += wobble;
+  // Braking bites faster than accelerating, so corner slowdowns actually happen.
+  const ease = targetSpeed < rival.speed ? dt * 4 : dt * 1.6;
+  rival.speed += (targetSpeed - rival.speed) * Math.min(1, ease);
+  const nx = rival.x + Math.cos(rival.angle) * rival.speed * dt;
+  const ny = rival.y + Math.sin(rival.angle) * rival.speed * dt;
+  const fixed = collideBuildings(state.city, nx, ny, 22);
+  const clamped = clampToWorld(fixed.x, fixed.y, 24);
+  if (Math.hypot(fixed.x - nx, fixed.y - ny) > 1) {
+    rival.speed *= 0.5;
+    rival.backup = 0.6;
+  }
+  rival.x = clamped.x;
+  rival.y = clamped.y;
+  if (dist < RACE_CHECKPOINT_RADIUS) {
     rival.checkpoint += 1;
-    if (rival.checkpoint >= track.checkpoints.length) {
-      rival.checkpoint = 0;
-      rival.lap += 1;
-      if (rival.lap > track.laps) {
-        rival.finished = true;
-        rival.finishTime = rival.raceTimer || 0;
-        rival.speed *= 0.5;
-        return;
-      }
+    if (rival.checkpoint >= circuit.checkpoints.length) {
+      rival.finished = true;
+      rival.finishTime = race.timer;
+      rival.place = 1 + race.rivals.filter((r) => r.finished).length;
+      tell(state, `${rival.name} finished in ${rival.finishTime.toFixed(1)}s!`, 3);
     }
   }
-  // Rubber-banding: a rival far behind the player finds a little extra
-  // pace, one far ahead eases off, so races stay close to the end.
-  const myScore = progressScore(rival, track, false);
-  let pace = 1;
-  if (playerScore - myScore > 15000) pace = 1.09;
-  else if (myScore - playerScore > 15000) pace = 0.94;
-  const wantAngle = Math.atan2(target.y - rival.y, target.x - rival.x);
-  const diff = angleDiff(wantAngle, rival.angle);
-  const turn = Math.max(-rival.turnSkill * dt, Math.min(rival.turnSkill * dt, diff));
-  rival.angle += turn;
-  // Hard corners cost speed: a rival turning sharply scrubs pace, just
-  // like the player's car does when it drifts.
-  const cornerPenalty = Math.abs(diff) > 0.9 ? 0.72 : 1;
-  const desired = rival.topSpeed * pace * cornerPenalty;
-  rival.speed += (desired - rival.speed) * dt * 1.1;
-  rival.x += Math.cos(rival.angle) * rival.speed * dt;
-  rival.y += Math.sin(rival.angle) * rival.speed * dt;
-  const fixed = clampToWorld(rival.x, rival.y, 30);
-  rival.x = fixed.x;
-  rival.y = fixed.y;
-  // A nudge of chaos: once in a while a rival clips a corner wide.
-  if (random() < dt * 0.05) rival.angle += (random() - 0.5) * 0.3;
 }
 
-export function raceTimeString(seconds) {
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds - minutes * 60;
-  if (minutes === 0) return `${rest.toFixed(1)}s`;
-  return `${minutes}:${rest.toFixed(1).padStart(4, '0')}`;
-}
-
-export function streetRaceObjective(race) {
-  if (!race.active) return null;
-  const track = STREET_RACE_TRACKS[race.trackIndex];
-  if (!track) return null;
-  return {
-    x: track.checkpoints[race.checkpoint].x,
-    y: track.checkpoints[race.checkpoint].y,
-    text: `${track.name} — lap ${race.lap}/${track.laps}, checkpoint ${race.checkpoint + 1}/${track.checkpoints.length}`,
-  };
-}
-
-export function streetRaceStatusLine(race) {
-  if (!race.active) return '';
-  const track = STREET_RACE_TRACKS[race.trackIndex];
-  if (!track) return '';
-  const place = race.position;
-  const suffix = place === 1 ? 'st' : place === 2 ? 'nd' : place === 3 ? 'rd' : 'th';
-  return `${track.name} — ${place}${suffix} of 4 — lap ${race.lap}/${track.laps} — ${raceTimeString(race.timer)}`;
-}
-
-function finishPlayerRace(race, state, track) {
-  race.active = false;
-  race.finished = true;
-  const place = currentPosition(race, state, track);
-  race.position = place;
-  const t = race.timer;
-  const best = race.best[track.id];
-  if (best === undefined || t < best) race.best[track.id] = t;
-  let payout = 0;
-  let line = '';
-  if (place === 1) {
-    payout = track.prize;
-    race.wins += 1;
-    state.stats.streetRaceWins = (state.stats.streetRaceWins || 0) + 1;
-    line = `You won the ${track.name}! ${raceTimeString(t)} — +$${payout}`;
-  } else if (place === 2) {
-    payout = Math.floor(track.prize / 2);
-    line = `2nd in the ${track.name} — ${raceTimeString(t)} — +$${payout}`;
-  } else if (place === 3) {
-    payout = race.entryFeePaid;
-    line = `3rd in the ${track.name} — entry fee back, +$${payout}`;
-  } else {
-    line = `Last in the ${track.name} — ${raceTimeString(t)} — entry fee lost.`;
-  }
-  if (payout > 0) {
-    state.player.money += payout;
-    state.stats.earned = (state.stats.earned || 0) + payout;
-  }
-  race.rivals = [];
-  state.missions.message = line;
-  state.missions.messageTimer = 5;
-}
-
-export function stepStreetRace(race, state, dt, random) {
+export function stepRace(race, state, dt, random) {
   if (!race.active) return;
-  const track = STREET_RACE_TRACKS[race.trackIndex];
-  if (!track) {
+  // Busted, wasted or out of the car: the race is over, entry fee lost.
+  if (state.busted || state.wasted || !state.player.inCar) {
     race.active = false;
+    race.rivals = [];
+    if (!state.busted && !state.wasted) tell(state, 'Race abandoned — you left the car.', 3);
+    return;
+  }
+  const car = state.player.inCar;
+  if (car.health <= 0) {
+    race.active = false;
+    race.rivals = [];
+    tell(state, 'Your car is wrecked — race over.', 3);
     return;
   }
   race.timer += dt;
-  for (const rival of race.rivals) rival.raceTimer = race.timer;
-  const playerCar = state.player.inCar;
-  const px = playerCar ? playerCar.x : state.player.x;
-  const py = playerCar ? playerCar.y : state.player.y;
-  const playerRacer = { lap: race.lap, checkpoint: race.checkpoint, finished: false, finishTime: 0 };
-  const playerScore = progressScore(playerRacer, track, true, { x: px, y: py });
-  // The player's checkpoint: drive through the ring to advance, lap after lap.
-  const cp = track.checkpoints[race.checkpoint];
-  if (Math.hypot(px - cp.x, py - cp.y) < STREET_RACE_CHECKPOINT_RADIUS) {
+  const circuit = RACE_CIRCUITS[race.circuitIndex];
+  for (const rival of race.rivals) stepRival(rival, race, state, dt, random);
+  const cp = circuit.checkpoints[race.checkpoint];
+  if (!cp) return;
+  if (Math.hypot(car.x - cp.x, car.y - cp.y) < RACE_CHECKPOINT_RADIUS) {
     race.checkpoint += 1;
-    if (race.checkpoint >= track.checkpoints.length) {
-      race.checkpoint = 0;
-      race.lap += 1;
-      if (race.lap > track.laps) {
-        finishPlayerRace(race, state, track);
-        return;
-      }
-      state.missions.message = `Lap ${race.lap} of ${track.laps} — ${currentPosition(race, state, track)} of 4!`;
-      state.missions.messageTimer = 2;
+    if (race.checkpoint >= circuit.checkpoints.length) {
+      finishRace(race, state);
     } else {
-      state.missions.message = `Checkpoint ${race.checkpoint + 1} of ${track.checkpoints.length} — keep pushing!`;
-      state.missions.messageTimer = 2;
+      tell(state, `Checkpoint ${race.checkpoint} of ${circuit.checkpoints.length} — ${racePositionText(race)}!`, 2);
     }
-  }
-  for (const rival of race.rivals) stepRival(rival, track, dt, playerScore, random);
-  race.position = currentPosition(race, state, track);
-  // Everyone finished but the player: the race is over, score it on pace.
-  if (race.rivals.length > 0 && race.rivals.every((r) => r.finished)) {
-    finishPlayerRace(race, state, track);
   }
 }
 
-// Short course guide for the help screen and the start-line prompt.
-export function streetRaceGuide() {
-  return STREET_RACE_TRACKS.map((track, i) => {
-    const start = track.checkpoints[0];
-    return `${i + 1}. ${track.name} — $${track.entryFee} in, $${track.prize} to win, ${track.laps} lap${track.laps > 1 ? 's' : ''} (starts ${start.x}, ${start.y})`;
-  }).join('\n');
+function finishRace(race, state) {
+  const circuit = RACE_CIRCUITS[race.circuitIndex];
+  const t = race.timer;
+  race.active = false;
+  race.playerPlace = 1 + race.rivals.filter((r) => r.finished).length;
+  const previousBest = race.best[race.circuitIndex];
+  if (previousBest === null || t < previousBest) race.best[race.circuitIndex] = t;
+  const isRecord = previousBest === null || t < previousBest;
+  if (race.playerPlace === 1) {
+    state.player.money += RACE_PRIZE;
+    race.wins += 1;
+    if (state.stats) state.stats.racesWon = (state.stats.racesWon || 0) + 1;
+    tell(state, `${circuit.name} — YOU WIN in ${t.toFixed(1)}s! +$${RACE_PRIZE}${isRecord ? ' — new best time!' : ''}`, 6);
+  } else {
+    tell(state, `${circuit.name} — finished ${ordinal(race.playerPlace)} in ${t.toFixed(1)}s. No prize — win it next time.${isRecord ? ' Still a new best time!' : ''}`, 5);
+  }
+  race.rivals = [];
+}
+
+// One line per circuit for the title screen: name, entry fee, best time.
+export function raceSummaryLines(race) {
+  return RACE_CIRCUITS.map((c, i) => {
+    const best = race.best[i];
+    return `${c.name} ($${c.entryFee} in, $${RACE_PRIZE} to win): best ${formatRaceTime(best)}`;
+  });
+}
+
+export function totalRacesWon(race) {
+  return race.wins;
+}
+
+export function bestRaceTime(race) {
+  let best = null;
+  for (const t of race.best) {
+    if (t !== null && (best === null || t < best)) best = t;
+  }
+  return best;
+}
+
+// Keep the world inside the map when a circuit is defined near an edge.
+export function circuitsFitWorld() {
+  for (const circuit of RACE_CIRCUITS) {
+    const points = [circuit.start, ...circuit.checkpoints];
+    for (const p of points) {
+      if (p.x < 40 || p.x > WORLD.width - 40 || p.y < 40 || p.y > WORLD.height - 40) return false;
+    }
+  }
+  return true;
 }

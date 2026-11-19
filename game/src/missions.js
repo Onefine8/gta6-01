@@ -1,7 +1,7 @@
 // Story missions and side activities for Palmetto Bay Heat. Each mission is a small
 // state machine: an intro line, a chain of objectives (go here, do that), a reward,
-// and a fail condition. Side activities — the street race and the hidden packages —
-// live here too, so the main loop only asks: what is the current objective?
+// and a fail condition. Side activities — the street races and the hidden packages —
+// live in races.js and here, so the main loop only asks: what is the current objective?
 import { HEIST } from './config.js';
 import { addWanted } from './police.js';
 export const MISSION_DEFS = [
@@ -61,30 +61,18 @@ export const MISSION_DEFS = [
     id: 5,
     title: 'Downtown Heist',
     giver: 'Dante',
-    intro: 'Dante: "The real score, Rico — the Downtown bank vault. Get inside, hold the drill on the vault till it pops, grab the bags, then vanish before the precinct boxes you in. This one pays like nothing else."',
+    intro: 'Dante: "The big one, Rico — the Downtown bank. Get inside, crack the vault, grab the cash and vanish before the whole precinct shows up. Quick and quiet pays double."',
     reward: 3500,
-    failText: 'The vault job blew up. Dante is done with you.',
+    failText: 'The vault never opened — Dante is done waiting.',
     timeLimit: 240,
     steps: [
-      { kind: 'goto', text: 'Reach the Downtown bank on 5th Avenue', x: HEIST.vaultX, y: HEIST.vaultY, radius: 110 },
-      { kind: 'crack', text: 'Crack the vault — stay inside while the drill works', x: HEIST.vaultX, y: HEIST.vaultY, radius: HEIST.vaultRadius, seconds: HEIST.crackSeconds, alarmStars: HEIST.alarmStars },
-      { kind: 'goto', text: 'Grab the cash bags at the vault door', x: 2520, y: 1120, radius: 80 },
+      { kind: 'goto', text: 'Get to the Downtown bank', x: 2800, y: 1200, radius: 110 },
+      { kind: 'crack', text: 'Crack the vault — stay inside the gold ring', x: 2800, y: 1000, radius: 100 },
+      { kind: 'grab', text: 'Grab the cash from the vault room', x: 2600, y: 1200, radius: 100 },
       { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
     ],
   },
 ];
-
-export const RACE = {
-  name: 'Palmetto GP',
-  start: { x: 600, y: 200 },
-  checkpoints: [
-    { x: 2600, y: 200 },
-    { x: 2600, y: 1800 },
-    { x: 600, y: 1800 },
-    { x: 600, y: 200 },
-  ],
-  prize: 600,
-};
 
 // Taxi side job: pick up a fare anywhere in the city and drop them off.
 // Repeatable, pays by distance, and runs alongside the story missions.
@@ -110,15 +98,14 @@ export function createMissionState() {
     failed: false,
     failText: '',
     done: false,
-    race: { active: false, checkpoint: 0, timer: 0, best: null },
     taxi: { active: false, phase: '', px: 0, py: 0, dx: 0, dy: 0, name: '', timer: 0, fare: 0 },
+    // Downtown Heist live state: vault-crack progress (0..1), the alarm meter
+    // (0..100), how many wanted stars the alarm has already raised, and the
+    // alarm level at the moment the cash was grabbed (for the quiet bonus).
+    heist: { crack: 0, alarm: 0, alarmStars: 0, grabAlarm: null },
     packagesFound: 0,
     message: '',
     messageTimer: 0,
-    // Vault-cracking progress for mission 5: the drill only works while Rico
-    // stays inside the vault ring, and the alarm goes off exactly once.
-    crackTimer: 0,
-    crackArmed: false,
   };
 }
 
@@ -132,8 +119,7 @@ export function startMission(missions, index) {
   missions.introText = def.intro;
   missions.introTimer = 6;
   missions.timer = def.timeLimit || 0;
-  missions.crackTimer = 0;
-  missions.crackArmed = false;
+  missions.heist = { crack: 0, alarm: 0, alarmStars: 0, grabAlarm: null };
   missions.message = `${def.title} — ${def.giver}`;
   missions.messageTimer = 4;
   return def;
@@ -152,15 +138,6 @@ export function objectiveText(missions) {
   }
   const step = currentStep(missions);
   return step ? step.text : '';
-}
-
-// Vault-drill progress, 0 to 1, while the current step is a crack step;
-// null the rest of the time, so the HUD only draws the bar when it matters.
-export function crackProgress(missions) {
-  if (!missions.active) return null;
-  const step = currentStep(missions);
-  if (!step || step.kind !== 'crack') return null;
-  return Math.max(0, Math.min(1, missions.crackTimer / (step.seconds || 12)));
 }
 
 export function showMessage(missions, text, seconds) {
@@ -186,7 +163,43 @@ export function stepMissions(missions, state, dt, events) {
   if (!step) return;
   const px = state.player.inCar ? state.player.inCar.x : state.player.x;
   const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-  if (step.kind === 'steal') {
+  // Downtown Heist alarm: once Rico is inside the bank the alarm climbs
+  // steadily, and at two thresholds it calls the law in for real.
+  if (def.id === 5 && missions.step >= 1) {
+    const heist = missions.heist;
+    heist.alarm = Math.min(100, heist.alarm + HEIST.alarmPerSecond * dt);
+    if (heist.alarm >= HEIST.alarmFirstStar && heist.alarmStars < 1) {
+      heist.alarmStars = 1;
+      addWanted(state, 1);
+      showMessage(missions, 'The bank alarm is screaming — the cops are coming!', 4);
+    } else if (heist.alarm >= HEIST.alarmSecondStar && heist.alarmStars < 2) {
+      heist.alarmStars = 2;
+      addWanted(state, 1);
+      showMessage(missions, 'Alarm maxed — the whole precinct is on its way!', 4);
+    }
+  }
+  if (step.kind === 'crack') {
+    // Cracking the vault is a channel: stand in the ring and the tumblers
+    // fall, step out and the progress slips away.
+    const d = Math.hypot(px - step.x, py - step.y);
+    const heist = missions.heist;
+    if (d < step.radius) {
+      heist.crack = Math.min(1, heist.crack + dt / HEIST.crackSeconds);
+      if (heist.crack >= 1) {
+        missions.step += 1;
+        showMessage(missions, 'Vault open! Grab the cash and run.', 3);
+      }
+    } else if (heist.crack > 0) {
+      heist.crack = Math.max(0, heist.crack - dt / HEIST.crackDecaySeconds);
+    }
+  } else if (step.kind === 'grab') {
+    const d = Math.hypot(px - step.x, py - step.y);
+    if (d < step.radius) {
+      missions.heist.grabAlarm = missions.heist.alarm;
+      missions.step += 1;
+      showMessage(missions, 'Cash grabbed — now lose the heat!', 3);
+    }
+  } else if (step.kind === 'steal') {
     // The step advances only when Rico is actually driving the right car —
     // any old stolen car does not count.
     const wantModel = step.model || 'Sunset Coupe';
@@ -202,28 +215,6 @@ export function stepMissions(missions, state, dt, events) {
       missions.step += 1;
       if (missions.step >= def.steps.length) completeMission(missions, state, def);
       else showMessage(missions, 'Objective done — next stop marked.', 3);
-    }
-  } else if (step.kind === 'crack') {
-    // Vault cracking: the drill only bites while Rico stays in the ring.
-    // Stepping out lets the drill cool — progress decays, it does not reset.
-    // The alarm trips the first moment the drill starts, and it brings heat.
-    if (!missions.crackArmed) {
-      missions.crackArmed = true;
-      missions.crackTimer = 0;
-      addWanted(state, step.alarmStars || 2);
-      showMessage(missions, 'ALARM! The vault drill is loud — police are coming. Hold the ring!', 4);
-    }
-    const d = Math.hypot(px - step.x, py - step.y);
-    if (d < step.radius) {
-      missions.crackTimer += dt;
-      if (missions.crackTimer >= (step.seconds || 12)) {
-        missions.step += 1;
-        missions.crackTimer = 0;
-        showMessage(missions, 'Vault popped! Grab the cash bags and run.', 3);
-      }
-    } else {
-      missions.crackTimer = Math.max(0, missions.crackTimer - dt * 0.5);
-      if (missions.crackTimer <= 0) showMessage(missions, 'Get back in the vault ring — the drill is stalling!', 2);
     }
   } else if (step.kind === 'escape') {
     if (state.wanted === 0) {
@@ -246,10 +237,11 @@ export function completeMission(missions, state, def) {
   missions.done = true;
   missions.index += 1;
   let reward = def.reward;
-  // Mission 5 pays a clean-getaway bonus when the clock still has a minute on it.
-  if (def.id === 5 && missions.timer > HEIST.cleanBonusSeconds) {
-    reward += HEIST.cleanBonus;
-    showMessage(missions, `${def.title} complete! +$${reward} (includes $${HEIST.cleanBonus} clean-getaway bonus)`, 5);
+  // Mission 5 pays a quiet bonus when the cash was grabbed before the alarm
+  // got loud — fast and quiet is worth more than fast and loud.
+  if (def.id === 5 && missions.heist.grabAlarm !== null && missions.heist.grabAlarm < HEIST.quietBonusAlarm) {
+    reward += HEIST.quietBonus;
+    showMessage(missions, `${def.title} complete! +$${reward} (includes $${HEIST.quietBonus} quiet-job bonus)`, 5);
   } else if (def.id === 1 && state.player.inCar && state.player.inCar.health >= 80) {
     reward += 100;
     showMessage(missions, `${def.title} complete! +$${reward} (includes $100 clean-delivery bonus)`, 5);
@@ -257,13 +249,6 @@ export function completeMission(missions, state, def) {
     showMessage(missions, `${def.title} complete! +$${reward}`, 5);
   }
   state.player.money += reward;
-}
-
-export function startRace(missions) {
-  missions.race.active = true;
-  missions.race.checkpoint = 0;
-  missions.race.timer = 0;
-  showMessage(missions, 'Palmetto GP started! Hit all 4 checkpoints — fastest lap wins $600.', 4);
 }
 
 export function startTaxi(missions, state, random) {
@@ -319,26 +304,5 @@ export function stepTaxi(missions, state, dt) {
     state.player.money += taxi.fare;
     state.stats.taxis = (state.stats.taxis || 0) + 1;
     showMessage(missions, `Fare complete! +$${taxi.fare}`, 4);
-  }
-}
-
-export function stepRace(missions, state, dt) {
-  const race = missions.race;
-  if (!race.active) return;
-  race.timer += dt;
-  const cp = RACE.checkpoints[race.checkpoint];
-  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-  if (Math.hypot(px - cp.x, py - cp.y) < 120) {
-    race.checkpoint += 1;
-    if (race.checkpoint >= RACE.checkpoints.length) {
-      race.active = false;
-      const t = race.timer;
-      if (race.best === null || t < race.best) race.best = t;
-      state.player.money += RACE.prize;
-      showMessage(missions, `Race finished in ${t.toFixed(1)}s! +$${RACE.prize}`, 5);
-    } else {
-      showMessage(missions, `Checkpoint ${race.checkpoint} of 4 — keep going!`, 2);
-    }
   }
 }

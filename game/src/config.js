@@ -31,14 +31,28 @@ export const PLAYER = {
 };
 
 // Places that do something: the garage repairs cars, the hospital heals Rico,
-// the precinct is where busted players wake up.
+// the precinct is where busted players wake up, the bank is Dante's big job.
 export const SITES = {
   garage: { x: 400, y: 360, radius: 130, name: 'Marina Garage' },
   hospital: { x: 2400, y: 1960, radius: 130, name: 'Bay General Hospital' },
   precinct: { x: 1200, y: 360, radius: 110, name: 'PBPD Precinct 2' },
+  bank: { x: 2800, y: 1200, radius: 110, name: 'Downtown Bank' },
 };
 export const REPAIR_COST = 50;
 export const HEAL_COST = 30;
+
+// Downtown Heist tuning: how long the vault takes to crack, how fast the
+// crack progress fades when Rico steps out of the ring, how fast the alarm
+// climbs once he is inside, and what counts as a quiet job for the bonus.
+export const HEIST = {
+  crackSeconds: 8,
+  crackDecaySeconds: 4,
+  alarmPerSecond: 2.4,
+  alarmFirstStar: 50,
+  alarmSecondStar: 85,
+  quietBonusAlarm: 60,
+  quietBonus: 500,
+};
 
 // Named districts, shown in the HUD as Rico crosses the city.
 export const DISTRICTS = [
@@ -58,19 +72,6 @@ export const TAXI = {
   perUnit: 0.055,
   waitSeconds: 30,
   nearMissBonus: 25,
-};
-
-// Downtown Heist (mission 5): the vault under the Downtown bank. The drill
-// needs seconds on site, the alarm brings the whole precinct, and a fast,
-// clean getaway pays a bonus on top of the take.
-export const HEIST = {
-  vaultX: 2400,
-  vaultY: 1000,
-  vaultRadius: 70,
-  crackSeconds: 12,
-  alarmStars: 2,
-  cleanBonus: 500,
-  cleanBonusSeconds: 60,
 };
 
 export const CAR = {

@@ -10,8 +10,8 @@ import { createCity, createParkedCars, nearSite } from './world.js';
 import { createPlayer, enterCar, exitCar, nearestCar, punch, stepPlayer } from './player.js';
 import { createPedestrians, createTraffic, startleTraffic, stepDrivenCar, stepPedestrian, stepTrafficCar } from './vehicles.js';
 import { addWanted, clearWanted, createPolice, stepPolice } from './police.js';
-import { MISSION_DEFS, RACE, createMissionState, objectiveText, showMessage, startMission, startRace, startTaxi, stepMissions, stepRace, stepTaxi, taxiObjective } from './missions.js';
-import { cancelStreetRace, createStreetRaceState, startStreetRace, stepStreetRace, streetRaceObjective, trackAtStart } from './races.js';
+import { MISSION_DEFS, createMissionState, objectiveText, showMessage, startMission, startTaxi, stepMissions, stepTaxi, taxiObjective } from './missions.js';
+import { RACE_CIRCUITS, canStartRace, createRaceState, currentRaceCheckpoint, nearestCircuit, startRace, stepRace } from './races.js';
 import { ACTION_CONFIRM, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_TAXI, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
@@ -39,7 +39,7 @@ function createState() {
     peds: createPedestrians(random, 26),
     police: createPolice(),
     missions: createMissionState(),
-    streetRace: createStreetRaceState(),
+    race: createRaceState(),
     missionsDone: 0,
     time: { hour: TIME.startHour, isNight: false, raining: false },
     elapsed: 0,
@@ -49,13 +49,12 @@ function createState() {
     wasted: false,
     bailCost: 150,
     objectivePos: null,
-    raceCheckpoints: RACE.checkpoints,
     weatherTimer: 40,
     saveTimer: 0,
     // New in this round: a short event feed for the HUD, run stats, the help
     // overlay flag, a pending-steal flag for mission 1, and near-miss timing.
     feed: [],
-    stats: { earned: 0, nearMiss: 0, taxis: 0 },
+    stats: { earned: 0, nearMiss: 0, taxis: 0, racesWon: 0 },
     helpOpen: false,
     pendingSteal: false,
     nearMissCooldown: 0,
@@ -84,10 +83,8 @@ function saveGame() {
       missionsDone: state.missionsDone,
       missionIndex: state.missions.index,
       packages: taken,
-      raceBest: state.missions.race.best,
-      streetRaceBest: state.streetRace.best,
-      streetRaceWins: state.streetRace.wins,
-      streetRacesRun: state.streetRace.racesRun,
+      raceBest: state.race.best,
+      raceWins: state.race.wins,
       health: state.player.health,
       stats: state.stats,
     }));
@@ -110,10 +107,9 @@ function loadGame() {
       state.city.packages.forEach((p, i) => { p.taken = data.packages[i] === 1; });
       state.missions.packagesFound = state.city.packages.filter((p) => p.taken).length;
     }
-    if (typeof data.raceBest === 'number') state.missions.race.best = data.raceBest;
-    if (data.streetRaceBest && typeof data.streetRaceBest === 'object') state.streetRace.best = data.streetRaceBest;
-    if (typeof data.streetRaceWins === 'number') state.streetRace.wins = data.streetRaceWins;
-    if (typeof data.streetRacesRun === 'number') state.streetRace.racesRun = data.streetRacesRun;
+    if (Array.isArray(data.raceBest)) state.race.best = data.raceBest.slice(0, 3);
+    else if (typeof data.raceBest === 'number') state.race.best = [data.raceBest, null, null];
+    if (typeof data.raceWins === 'number') state.race.wins = data.raceWins;
     if (typeof data.health === 'number') state.player.health = data.health;
     if (data.stats && typeof data.stats === 'object') state.stats = { ...state.stats, ...data.stats };
   } catch {
@@ -123,14 +119,8 @@ function loadGame() {
 
 function updateObjectivePos() {
   const m = state.missions;
-  // A street race owns the beacon while it runs — the next checkpoint.
-  const street = streetRaceObjective(state.streetRace);
-  if (street) {
-    state.objectivePos = { x: street.x, y: street.y };
-    return;
-  }
-  if (m.race.active) {
-    state.objectivePos = RACE.checkpoints[m.race.checkpoint];
+  if (state.race.active) {
+    state.objectivePos = currentRaceCheckpoint(state.race);
     return;
   }
   if (!m.active || m.index >= MISSION_DEFS.length) {
@@ -203,7 +193,6 @@ function stepWorld(dt, input) {
       }
     }
     if (car.health <= 0) {
-      cancelStreetRace(state.streetRace, state, '');
       state.wasted = true;
       player.health = 0;
     }
@@ -214,8 +203,7 @@ function stepWorld(dt, input) {
   for (const ped of state.peds) stepPedestrian(ped, dt, random, city, player);
   stepPolice(state.police, state, dt, random);
   stepMissions(state.missions, state, dt, events);
-  stepRace(state.missions, state, dt);
-  stepStreetRace(state.streetRace, state, dt, random);
+  stepRace(state.race, state, dt, random);
   stepTaxi(state.missions, state, dt);
   updateObjectivePos();
 
@@ -247,8 +235,9 @@ function stepWorld(dt, input) {
     state.bailCost = 150;
     player.money = Math.max(0, player.money - state.bailCost);
     clearWanted(state, state.police);
-    cancelStreetRace(state.streetRace, state, '');
     state.missions.taxi.active = false;
+    state.race.active = false;
+    state.race.rivals = [];
     player.x = 600;
     player.y = 320;
     if (player.inCar) { player.inCar.driver = null; player.inCar = null; }
@@ -346,21 +335,22 @@ function runGame() {
     if (actions & ACTION_RACE) {
       const px = state.player.inCar ? state.player.inCar.x : state.player.x;
       const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-      // A street-race start line takes priority: standing on one enters
-      // that circuit. Otherwise the old Palmetto GP start still works.
-      const trackIndex = trackAtStart(px, py);
-      if (state.streetRace.active) {
-        showMessage(state.missions, 'You are already racing — finish it first.', 3);
-      } else if (trackIndex >= 0) {
-        if (startStreetRace(state.streetRace, state, trackIndex, random)) audio.click();
+      const circuit = nearestCircuit(px, py);
+      if (state.race.active) {
+        showMessage(state.missions, 'You are already racing — reach the last checkpoint!', 3);
+      } else if (circuit < 0) {
+        const names = RACE_CIRCUITS.map((c) => c.name).join(', ');
+        showMessage(state.missions, `Races start at the checkered flags — ${names}. Drive to one and press R.`, 5);
       } else {
-        const near = Math.hypot(state.player.x - RACE.start.x, state.player.y - RACE.start.y) < 160
-          || (state.player.inCar && Math.hypot(state.player.inCar.x - RACE.start.x, state.player.inCar.y - RACE.start.y) < 160);
-        if (!state.missions.race.active && near) {
-          startRace(state.missions);
-          audio.click();
-        } else if (!state.missions.race.active) {
-          showMessage(state.missions, 'Races start at a start line — the Palmetto GP flag by Marina Garage, or a street-race line downtown. Drive there and press R.', 4);
+        const whyNot = canStartRace(state, circuit);
+        if (whyNot) {
+          showMessage(state.missions, whyNot, 4);
+        } else {
+          const fee = RACE_CIRCUITS[circuit].entryFee;
+          if (startRace(state.race, state, circuit, random)) {
+            pushFeed(state, `Entered ${RACE_CIRCUITS[circuit].name}  -$${fee}`);
+            audio.click();
+          }
         }
       }
     }

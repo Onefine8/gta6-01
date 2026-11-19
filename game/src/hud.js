@@ -1,8 +1,8 @@
 // The HUD: cash, health, wanted stars, speed, mission objective, messages and
 // the minimap. Drawn in screen space (1280 x 720) on top of the world view.
 import { FIELD, FONT, PACKAGES_TOTAL, PALETTE, SITES, WORLD } from './config.js';
-import { MISSION_DEFS, RACE, crackProgress, objectiveText, taxiObjective } from './missions.js';
-import { STREET_RACE_TRACKS, streetRaceStatusLine } from './races.js';
+import { MISSION_DEFS, objectiveText, taxiObjective } from './missions.js';
+import { RACE_CIRCUITS, currentRaceCheckpoint, racePositionText } from './races.js';
 import { districtAt, nearSite } from './world.js';
 
 const MM = { x: FIELD.width - 236, y: 16, w: 220, h: 164 };
@@ -76,30 +76,28 @@ export function drawMinimap(ctx, state, city) {
     ctx.arc(MM.x + tx * sx, MM.y + ty * sy, 4, 0, Math.PI * 2);
     ctx.fill();
   }
-  // Street-race rivals (magenta) and the next street-race checkpoint (gold ring).
-  const street = state.streetRace;
-  if (street && street.active) {
-    const track = STREET_RACE_TRACKS[street.trackIndex];
-    if (track) {
-      const cp = track.checkpoints[street.checkpoint];
-      ctx.strokeStyle = PALETTE.gold;
-      ctx.lineWidth = 2;
+  // Race start flags (checkered squares) and, mid-race, the rivals.
+  ctx.fillStyle = '#fff';
+  for (const c of RACE_CIRCUITS) {
+    ctx.fillRect(MM.x + c.start.x * sx - 3, MM.y + c.start.y * sy - 3, 6, 6);
+  }
+  if (state.race.active) {
+    for (const rival of state.race.rivals) {
+      ctx.fillStyle = rival.color;
       ctx.beginPath();
-      ctx.arc(MM.x + cp.x * sx, MM.y + cp.y * sy, 6, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.fillStyle = '#e879f9';
-    for (const rival of street.rivals) {
-      ctx.fillRect(MM.x + rival.x * sx - 2, MM.y + rival.y * sy - 2, 4, 4);
+      ctx.arc(MM.x + rival.x * sx, MM.y + rival.y * sy, 4, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
-  // Garage (green G), hospital (white cross) and roadblocks (orange).
+  // Garage (green G), hospital (white cross), bank (gold B) and roadblocks (orange).
   ctx.font = 'bold 9px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillStyle = PALETTE.garage;
   ctx.fillText('G', MM.x + SITES.garage.x * sx, MM.y + SITES.garage.y * sy + 3);
   ctx.fillStyle = '#fff';
   ctx.fillText('+', MM.x + SITES.hospital.x * sx, MM.y + SITES.hospital.y * sy + 3);
+  ctx.fillStyle = PALETTE.gold;
+  ctx.fillText('B', MM.x + SITES.bank.x * sx, MM.y + SITES.bank.y * sy + 3);
   ctx.textAlign = 'left';
   ctx.fillStyle = PALETTE.roadblock;
   for (const rb of state.police.roadblocks) {
@@ -132,12 +130,7 @@ export function drawMinimap(ctx, state, city) {
 
 export function currentObjectivePos(state) {
   const m = state.missions;
-  const street = state.streetRace;
-  if (street && street.active) {
-    const track = STREET_RACE_TRACKS[street.trackIndex];
-    if (track) return track.checkpoints[street.checkpoint];
-  }
-  if (m.race.active) return RACE.checkpoints[m.race.checkpoint];
+  if (state.race.active) return currentRaceCheckpoint(state.race);
   if (!m.active || m.index >= MISSION_DEFS.length) {
     const taxi = taxiObjective(m);
     return taxi ? { x: taxi.x, y: taxi.y } : null;
@@ -191,10 +184,8 @@ export function drawHud(ctx, state, time) {
   ctx.fillStyle = '#fff';
   ctx.fillText(`${clock}  ${time.raining ? 'RAIN' : time.isNight ? 'NIGHT' : 'DAY'}`, FIELD.width / 2, 18);
   ctx.textAlign = 'left';
-  // Objective bar, under the clock. A street race replaces the mission line.
-  const obj = state.streetRace && state.streetRace.active
-    ? streetRaceStatusLine(state.streetRace)
-    : objectiveText(state.missions);
+  // Objective bar, under the clock.
+  const obj = objectiveText(state.missions);
   ctx.font = `bold 18px ${FONT}`;
   const w = ctx.measureText(obj).width + 28;
   ctx.fillStyle = 'rgba(10,14,20,0.72)';
@@ -211,19 +202,6 @@ export function drawHud(ctx, state, time) {
   ctx.textAlign = 'center';
   ctx.fillText(districtAt(px0, py0), FIELD.width / 2, 90);
   ctx.textAlign = 'left';
-  // Vault-drill progress bar while mission 5 is cracking the vault.
-  const crack = crackProgress(state.missions);
-  if (crack !== null) {
-    ctx.fillStyle = 'rgba(10,14,20,0.72)';
-    ctx.fillRect(FIELD.width / 2 - 160, 134, 320, 24);
-    ctx.fillStyle = '#f97316';
-    ctx.fillRect(FIELD.width / 2 - 156, 138, 312 * crack, 16);
-    ctx.font = `bold 15px ${FONT}`;
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.fillText(`CRACKING THE VAULT  ${Math.round(crack * 100)}%`, FIELD.width / 2, 139);
-    ctx.textAlign = 'left';
-  }
   // Taxi job line, when a fare is running.
   const taxi = taxiObjective(state.missions);
   if (taxi) {
@@ -248,20 +226,6 @@ export function drawHud(ctx, state, time) {
     ctx.textAlign = 'center';
     ctx.fillText('G — Patch up at Bay General for $30', FIELD.width / 2, 156);
     ctx.textAlign = 'left';
-  }
-  // Street-race start-line prompt when Rico is parked on one in a car.
-  if (state.player.inCar && state.streetRace && !state.streetRace.active) {
-    const here = STREET_RACE_TRACKS.find((track) => {
-      const s = track.checkpoints[0];
-      return Math.hypot(px0 - s.x, py0 - s.y) < 170;
-    });
-    if (here) {
-      ctx.font = `bold 17px ${FONT}`;
-      ctx.fillStyle = '#e879f9';
-      ctx.textAlign = 'center';
-      ctx.fillText(`R — Enter the ${here.name}: $${here.entryFee} in, $${here.prize} to the winner`, FIELD.width / 2, 156);
-      ctx.textAlign = 'left';
-    }
   }
   // Event feed: the last few things that happened, bottom-right.
   if (state.feed && state.feed.length > 0) {
@@ -301,12 +265,34 @@ export function drawHud(ctx, state, time) {
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
     ctx.fillText('E — car   Q — punch   M — mission   R — race   T — taxi   G — repair   C — horn   H — help   P — pause', 16, FIELD.height - 28);
   }
-  // Race timer.
-  if (state.missions.race.active) {
+  // Race timer: circuit name, clock, checkpoint and live position.
+  if (state.race.active) {
+    const circuit = RACE_CIRCUITS[state.race.circuitIndex];
     ctx.font = `bold 22px ${FONT}`;
     ctx.fillStyle = '#ffd23f';
     ctx.textAlign = 'center';
-    ctx.fillText(`RACE ${state.missions.race.timer.toFixed(1)}s — checkpoint ${state.missions.race.checkpoint + 1}/4`, FIELD.width / 2, 112);
+    ctx.fillText(`${circuit.name}  ${state.race.timer.toFixed(1)}s — checkpoint ${state.race.checkpoint + 1}/${circuit.checkpoints.length} — ${racePositionText(state.race)}`, FIELD.width / 2, 112);
+    ctx.textAlign = 'left';
+  }
+  // Downtown Heist meters: vault-crack progress and the rising alarm.
+  // (Drawn below the countdown so the two never share a line.)
+  if (state.missions.active && state.missions.index === 4 && state.missions.step >= 1) {
+    const heist = state.missions.heist;
+    const barY = 158;
+    ctx.font = `bold 15px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillText(`VAULT ${Math.round(heist.crack * 100)}%`, FIELD.width / 2 - 130, barY + 4);
+    ctx.fillStyle = '#1f2937';
+    ctx.fillRect(FIELD.width / 2 - 60, barY, 120, 12);
+    ctx.fillStyle = '#f2c94c';
+    ctx.fillRect(FIELD.width / 2 - 60, barY, 120 * Math.max(0, Math.min(1, heist.crack)), 12);
+    ctx.fillStyle = heist.alarm > 70 ? '#ff6b6b' : '#fb923c';
+    ctx.fillText(`ALARM ${Math.round(heist.alarm)}%`, FIELD.width / 2 + 130, barY + 4);
+    ctx.fillStyle = '#1f2937';
+    ctx.fillRect(FIELD.width / 2 + 190, barY, 120, 12);
+    ctx.fillStyle = heist.alarm > 70 ? '#ff6b6b' : '#fb923c';
+    ctx.fillRect(FIELD.width / 2 + 190, barY, 120 * Math.max(0, Math.min(1, heist.alarm / 100)), 12);
     ctx.textAlign = 'left';
   }
   // Mission countdown.
