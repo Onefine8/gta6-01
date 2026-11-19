@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Palmetto Bay Heat — an open-world crime game. Steal cars, run missions, drive taxi fares, and outrun the Palmetto Bay police.">
+<meta name="theme-color" content="#0d1526">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d1526'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%23f2c94c'%3E%E2%98%85%3C/text%3E%3C/svg%3E">
 <title>Palmetto Bay Heat — Open-World Crime Game</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1526; }
@@ -22,11 +25,17 @@
     #touch .right { left: 160px; bottom: 110px; }
     #touch .enter { right: 16px; bottom: 110px; background: rgba(242,201,76,0.7); color: #10141b; }
     #touch .punch { right: 96px; bottom: 70px; }
+    #touch .race { right: 16px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
+    #touch .mission { right: 80px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
+    #touch .repair { right: 144px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
+    #touch .help { right: 208px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
   }
+  #noscript { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 18px system-ui, sans-serif; background: #0d1526; z-index: 10; text-align: center; padding: 24px; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Palmetto Bay Heat: an open-world crime game. Explore the city on foot or by car, take missions, and outrun the police."></canvas>
+<canvas id="game" aria-label="Palmetto Bay Heat: an open-world crime game. Explore the city on foot or by car, take missions and taxi fares, repair at the garage, and outrun the police."></canvas>
+<noscript><p id="noscript">Palmetto Bay Heat needs JavaScript to run — please enable it and reload.</p></noscript>
 <p id="status" role="status" aria-live="polite"></p>
 <div id="touch" aria-hidden="true">
   <button class="up" data-touch="up" type="button">▲</button>
@@ -35,6 +44,10 @@
   <button class="right" data-touch="right" type="button">▶</button>
   <button class="enter" data-touch="enter" type="button">E</button>
   <button class="punch" data-touch="punch" type="button">Q</button>
+  <button class="race" data-touch="race" type="button">R</button>
+  <button class="mission" data-touch="mission" type="button">M</button>
+  <button class="repair" data-touch="repair" type="button">G</button>
+  <button class="help" data-touch="help" type="button">?</button>
 </div>
 <script type="module" src="./src/main.js"></script>
 </body>

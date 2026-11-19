@@ -4,14 +4,14 @@
 //
 // ?shot=chase|walk|mission|night (with &seed=N) stages that scene instead of
 // running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { FIELD, SAVE_KEY, STEP, TIME, WORLD } from './config.js';
+import { FIELD, HEAL_COST, REPAIR_COST, SAVE_KEY, STEP, TIME, WORLD } from './config.js';
 import { createRandom } from './random.js';
-import { createCity, createParkedCars } from './world.js';
+import { createCity, createParkedCars, nearSite } from './world.js';
 import { createPlayer, enterCar, exitCar, nearestCar, punch, stepPlayer } from './player.js';
-import { createPedestrians, createTraffic, stepDrivenCar, stepPedestrian, stepTrafficCar } from './vehicles.js';
+import { createPedestrians, createTraffic, startleTraffic, stepDrivenCar, stepPedestrian, stepTrafficCar } from './vehicles.js';
 import { addWanted, clearWanted, createPolice, stepPolice } from './police.js';
-import { MISSION_DEFS, RACE, createMissionState, objectiveText, showMessage, startMission, startRace, stepMissions, stepRace } from './missions.js';
-import { ACTION_CONFIRM, ACTION_ENTER, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, createInput } from './input.js';
+import { MISSION_DEFS, RACE, createMissionState, objectiveText, showMessage, startMission, startRace, startTaxi, stepMissions, stepRace, stepTaxi, taxiObjective } from './missions.js';
+import { ACTION_CONFIRM, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_TAXI, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { stageShot } from './shots.js';
@@ -50,8 +50,22 @@ function createState() {
     raceCheckpoints: RACE.checkpoints,
     weatherTimer: 40,
     saveTimer: 0,
+    // New in this round: a short event feed for the HUD, run stats, the help
+    // overlay flag, a pending-steal flag for mission 1, and near-miss timing.
+    feed: [],
+    stats: { earned: 0, nearMiss: 0, taxis: 0 },
+    helpOpen: false,
+    pendingSteal: false,
+    nearMissCooldown: 0,
+    hornCooldown: 0,
+    skidCooldown: 0,
   };
   return state;
+}
+
+function pushFeed(state, text) {
+  state.feed.push(text);
+  if (state.feed.length > 6) state.feed.shift();
 }
 
 const state = createState();
@@ -70,6 +84,7 @@ function saveGame() {
       packages: taken,
       raceBest: state.missions.race.best,
       health: state.player.health,
+      stats: state.stats,
     }));
   } catch {
     // Storage can be off: progress then lasts this visit only.
@@ -92,6 +107,7 @@ function loadGame() {
     }
     if (typeof data.raceBest === 'number') state.missions.race.best = data.raceBest;
     if (typeof data.health === 'number') state.player.health = data.health;
+    if (data.stats && typeof data.stats === 'object') state.stats = { ...state.stats, ...data.stats };
   } catch {
     // A corrupt save is ignored; a fresh game starts instead.
   }
@@ -103,7 +119,11 @@ function updateObjectivePos() {
     state.objectivePos = RACE.checkpoints[m.race.checkpoint];
     return;
   }
-  if (!m.active || m.index >= MISSION_DEFS.length) { state.objectivePos = null; return; }
+  if (!m.active || m.index >= MISSION_DEFS.length) {
+    const taxi = taxiObjective(m);
+    state.objectivePos = taxi ? { x: taxi.x, y: taxi.y } : null;
+    return;
+  }
   const step = MISSION_DEFS[m.index].steps[m.step];
   if (!step || step.kind === 'escape') { state.objectivePos = null; return; }
   state.objectivePos = { x: step.x, y: step.y };
@@ -121,14 +141,44 @@ function updateTime(dt) {
 }
 
 function stepWorld(dt, input) {
-  const events = { stolenCar: false };
+  const events = { stolenCar: state.pendingSteal };
+  state.pendingSteal = false;
   state.elapsed += dt;
   updateTime(dt);
   const player = state.player;
 
   if (player.inCar) {
     const car = player.inCar;
-    stepDrivenCar(car, input, dt, city, [...state.parkedCars, ...state.traffic, ...state.police.cars]);
+    stepDrivenCar(car, input, dt, city, [...state.parkedCars, ...state.traffic, ...state.police.cars], state.time);
+    state.skidCooldown -= dt;
+    if (car.drifting && state.skidCooldown <= 0) {
+      state.skidCooldown = 0.35;
+      audio.skid();
+    }
+    // Horn (held): toot, and startle nearby traffic into a burst of speed.
+    state.hornCooldown -= dt;
+    if (input.horn() && state.hornCooldown <= 0) {
+      state.hornCooldown = 0.8;
+      audio.horn();
+      startleTraffic(state.traffic, car.x, car.y, 260);
+    }
+    // Near-miss bonus: flashing past a traffic car at speed pays $25.
+    state.nearMissCooldown -= dt;
+    if (Math.abs(car.speed) > 300 && state.nearMissCooldown <= 0) {
+      for (const other of state.traffic) {
+        const d = Math.hypot(other.x - car.x, other.y - car.y);
+        if (d > 46 && d < 72) {
+          state.nearMissCooldown = 3;
+          state.stats.nearMiss += 1;
+          player.money += 25;
+          state.stats.earned += 25;
+          audio.pickup();
+          pushFeed(state, 'Near miss  +$25');
+          showMessage(state.missions, 'Near miss! +$25', 2);
+          break;
+        }
+      }
+    }
     // Running over a pedestrian at speed draws the law.
     for (const ped of state.peds) {
       if (Math.hypot(ped.x - car.x, ped.y - car.y) < 34 && Math.abs(car.speed) > 140) {
@@ -145,11 +195,12 @@ function stepWorld(dt, input) {
   } else {
     stepPlayer(player, input, dt, city);
   }
-  for (const car of state.traffic) stepTrafficCar(car, dt, random);
+  for (const car of state.traffic) stepTrafficCar(car, dt, random, [...state.traffic, ...state.police.cars, ...(state.player.inCar ? [state.player.inCar] : [])]);
   for (const ped of state.peds) stepPedestrian(ped, dt, random, city, player);
   stepPolice(state.police, state, dt, random);
   stepMissions(state.missions, state, dt, events);
   stepRace(state.missions, state, dt);
+  stepTaxi(state.missions, state, dt);
   updateObjectivePos();
 
   // Hidden packages: walk or drive over one to collect it ($100 each).
@@ -169,12 +220,18 @@ function stepWorld(dt, input) {
   if (state.missions.done) {
     state.missionsDone = Math.max(state.missionsDone, state.missions.index);
     state.missions.done = false;
+    audio.fanfare();
     saveGame();
+  }
+  // Standing in the hospital zone patches Rico up for free, slowly.
+  if (!player.inCar && nearSite('hospital', player.x, player.y) && player.health < 100) {
+    player.health = Math.min(100, player.health + 6 * dt);
   }
   if (state.busted) {
     state.bailCost = 150;
     player.money = Math.max(0, player.money - state.bailCost);
     clearWanted(state, state.police);
+    state.missions.taxi.active = false;
     player.x = 600;
     player.y = 320;
     if (player.inCar) { player.inCar.driver = null; player.inCar = null; }
@@ -188,6 +245,7 @@ function stepWorld(dt, input) {
   if (state.saveTimer > 10) { state.saveTimer = 0; saveGame(); }
   audio.setEngine(player.inCar ? player.inCar.speed : 0, !!player.inCar);
   audio.siren(state.police.cars.length > 0);
+  audio.setHeli(!!state.police.heli);
   return null;
 }
 
@@ -230,6 +288,19 @@ function runGame() {
       const muted = audio.toggleMute();
       announce(muted ? 'Sound muted.' : 'Sound on.');
     }
+    // The help overlay (play screen only) eats every key except H / P to close.
+    if (state.helpOpen && screen === SCREEN_PLAY) {
+      if (actions & (ACTION_HELP | ACTION_PAUSE)) {
+        state.helpOpen = false;
+        announce('Playing.');
+      }
+      return;
+    }
+    if ((actions & ACTION_HELP) && screen === SCREEN_PLAY) {
+      state.helpOpen = true;
+      announce('Help open. Press H to close.');
+      return;
+    }
     if (screen === SCREEN_TITLE || screen === SCREEN_OVER || screen === SCREEN_BUSTED) {
       if (actions & ACTION_CONFIRM) startGame();
       return;
@@ -265,6 +336,44 @@ function runGame() {
         showMessage(state.missions, 'Race starts at the green flag by Marina Garage — drive there and press R.', 4);
       }
     }
+    if (actions & ACTION_TAXI) {
+      if (!state.missions.taxi.active) {
+        startTaxi(state.missions, state, random);
+        audio.click();
+      } else {
+        showMessage(state.missions, 'You already have a fare — finish it first.', 3);
+      }
+    }
+    if (actions & ACTION_REPAIR) {
+      const player = state.player;
+      if (player.inCar && nearSite('garage', player.inCar.x, player.inCar.y)) {
+        if (player.inCar.health >= 100) {
+          showMessage(state.missions, 'This car is already in perfect shape.', 2);
+        } else if (player.money < REPAIR_COST) {
+          showMessage(state.missions, `Repairs cost $${REPAIR_COST} — you cannot afford it yet.`, 3);
+        } else {
+          player.money -= REPAIR_COST;
+          player.inCar.health = 100;
+          audio.repair();
+          pushFeed(state, `Car repaired  -$${REPAIR_COST}`);
+          showMessage(state.missions, 'Marina Garage patched the car up — good as new.', 3);
+        }
+      } else if (!player.inCar && nearSite('hospital', player.x, player.y)) {
+        if (player.health >= 100) {
+          showMessage(state.missions, 'You are already at full health.', 2);
+        } else if (player.money < HEAL_COST) {
+          showMessage(state.missions, `Treatment costs $${HEAL_COST} — you cannot afford it yet.`, 3);
+        } else {
+          player.money -= HEAL_COST;
+          player.health = 100;
+          audio.repair();
+          pushFeed(state, `Patched up at Bay General  -$${HEAL_COST}`);
+          showMessage(state.missions, 'Bay General patched you up — full health.', 3);
+        }
+      } else {
+        showMessage(state.missions, 'Repairs happen at Marina Garage; healing at Bay General.', 3);
+      }
+    }
     if (actions & ACTION_ENTER) {
       const player = state.player;
       if (player.inCar) {
@@ -275,7 +384,9 @@ function runGame() {
           const result = enterCar(player, car);
           audio.click();
           if (result === 'stolen') {
+            state.pendingSteal = true;
             addWanted(state, 1);
+            pushFeed(state, `Stole the ${car.model} — wanted level up`);
             showMessage(state.missions, `You took the ${car.model} — the law noticed.`, 3);
           }
         }
@@ -296,10 +407,12 @@ function runGame() {
     const result = stepWorld(STEP, input);
     if (result === 'wasted') {
       screen = SCREEN_OVER;
+      audio.sting();
       saveGame();
       announce('Wasted. Press Space to get back up.');
     } else if (result === 'busted') {
       screen = SCREEN_BUSTED;
+      audio.sting();
       saveGame();
       announce('Busted. Press Space to walk free.');
     }
@@ -310,16 +423,22 @@ function runGame() {
     accumulator += Math.min((now - last) / 1000, MAX_FRAME);
     last = now;
     handleActions();
+    renderer.setZoom(input.zoomLevel());
     if (screen === SCREEN_TITLE) {
       // The title backdrop lives: traffic cruises while the player reads.
       state.elapsed += STEP;
       for (const car of state.traffic) stepTrafficCar(car, STEP, random);
       accumulator = 0;
     } else if (screen === SCREEN_PLAY) {
-      while (accumulator >= STEP) {
-        step();
-        accumulator -= STEP;
-        if (screen !== SCREEN_PLAY) { accumulator = 0; break; }
+      // The help overlay freezes the world while Rico reads it.
+      if (state.helpOpen) {
+        accumulator = 0;
+      } else {
+        while (accumulator >= STEP) {
+          step();
+          accumulator -= STEP;
+          if (screen !== SCREEN_PLAY) { accumulator = 0; break; }
+        }
       }
     } else {
       accumulator = 0;

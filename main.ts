@@ -4,9 +4,9 @@
 // screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library. The game is Palmetto Bay Heat, a 2D top-down
 // open-world crime game: a 3200x2400 coastal city, stealable cars, traffic and pedestrians, a
-// 5-star wanted level with chasing police, three story missions, a street race, hidden packages,
-// a day/night cycle with rain, a full HUD with minimap, synthesized WebAudio sound, touch
-// controls and localStorage saves — all in game/src, one job per file. Build your own open-world
+// 5-star wanted level with chasing police, roadblocks and a helicopter, four story missions,
+// a street race, taxi fares, hidden packages, a day/night cycle with rain, a full HUD with minimap,
+// synthesized WebAudio sound, touch controls and localStorage saves — all in game/src, one job per file. Build your own open-world
 // crime game in its place (three.js or any library you vendor under game/), put your 3 or 4 PNG
 // or JPEG screenshots in screenshots/ (the first by name is the cover) and run it.
 //

@@ -68,6 +68,15 @@ function spawnPoliceChase(state, x, y) {
   });
 }
 
+function spawnRoadblockAhead(state, x, y) {
+  // A striped PBPD roadblock on the road ahead of the player.
+  state.police.roadblocks = [{ x: x + 420, y, angle: Math.PI / 2, timer: 30 }];
+}
+
+function spawnHeliOverhead(state, x, y) {
+  state.police.heli = { angle: 0.6, x: x + 160, y: y - 160 };
+}
+
 /**
  * Stage `state` for the named scene and return the screen to draw over it.
  * Unknown names stage the chase (the cover).
@@ -83,14 +92,15 @@ export function stageShot(name, state, random) {
     state.time.isNight = false;
     state.time.raining = false;
     state.wanted = 0;
-    // Rico on foot at the 5th Avenue crossroads, right where the camera sits.
-    state.player.x = 2000;
-    state.player.y = 1200;
+    // Rico on foot outside Marina Garage, where cars get repaired.
+    state.player.x = 520;
+    state.player.y = 360;
     state.player.angle = -Math.PI / 2;
-    placeTrafficNear(state, 2000, 1200, random);
-    placePedsNear(state, 2000, 1200, random);
+    placeTrafficNear(state, 520, 360, random);
+    placePedsNear(state, 520, 360, random);
     state.missions.message = 'Explore Palmetto Bay on foot — packages hide in alleys and parks.';
     state.missions.messageTimer = 99;
+    state.feed = ['Taxi fare done  +$120', 'Hidden package found! 4/12  +$100'];
     return { screen: SCREEN_PLAY, best: 0 };
   }
   if (name === 'mission') {
@@ -107,13 +117,16 @@ export function stageShot(name, state, random) {
     placePedsNear(state, 2000, 800, random);
     spawnPoliceChase(state, 2000, 800);
     state.police.cars = state.police.cars.slice(0, 1);
+    // A live taxi fare runs beside the mission, so the HUD shows both.
+    state.missions.taxi = { active: true, phase: 'dropoff', px: 2000, py: 800, dx: 2800, dy: 2000, name: 'Lighthouse Point', timer: 64, fare: 210 };
+    state.feed = ['Near miss  +$25'];
     return { screen: SCREEN_PLAY, best: 0 };
   }
   if (name === 'night') {
     state.time.hour = 22.5;
     state.time.isNight = true;
     state.time.raining = true;
-    state.wanted = 2;
+    state.wanted = 4;
     putPlayerInCar(state, 2000, 1600, Math.PI / 2);
     state.missions.message = 'Night rain over the bay — lose the heat before dawn.';
     state.missions.messageTimer = 99;
@@ -121,6 +134,7 @@ export function stageShot(name, state, random) {
     placePedsNear(state, 2000, 1600, random);
     spawnPoliceChase(state, 2000, 1600);
     state.police.cars = state.police.cars.slice(0, 2);
+    spawnHeliOverhead(state, 2000, 1600);
     return { screen: SCREEN_PLAY, best: 0 };
   }
   // chase (cover): broad daylight, three stars, three cruisers, mission objective live.
@@ -138,5 +152,7 @@ export function stageShot(name, state, random) {
   placeTrafficNear(state, 2000, 1200, random);
   placePedsNear(state, 2000, 1200, random);
   spawnPoliceChase(state, 2000, 1200);
+  spawnRoadblockAhead(state, 2000, 1200);
+  state.feed = ['Near miss  +$25', 'Wanted level rose to 3 stars'];
   return { screen: SCREEN_PLAY, best: 0 };
 }

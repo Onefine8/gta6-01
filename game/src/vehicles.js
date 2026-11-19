@@ -3,18 +3,24 @@
 // speed along its nose, and a health bar; steering only bites while it moves.
 import { CAR, WORLD } from './config.js';
 import { clampToWorld, collideBuildings, isRoad, roadXs, roadYs } from './world.js';
+import { pick } from './random.js';
 
-export function stepDrivenCar(car, input, dt, city, others) {
+export function stepDrivenCar(car, input, dt, city, others, weather) {
   const throttle = input.throttle();
   const steer = input.steer();
   const braking = input.brake();
+  // Handbrake at speed = drift: sharper turn, speed bleeds, tyres smoke.
+  car.drifting = braking && Math.abs(car.speed) > 200;
   if (throttle > 0) car.speed += CAR.accel * dt;
   else if (throttle < 0) car.speed -= CAR.reverseAccel * dt;
   if (braking) car.speed -= Math.sign(car.speed) * CAR.brake * dt;
   car.speed -= car.speed * CAR.drag * dt;
   if (Math.abs(car.speed) < 4 && throttle === 0) car.speed = 0;
   car.speed = Math.max(-CAR.maxReverse, Math.min(car.topSpeed, car.speed));
-  const turn = steer * CAR.turnRate * dt * Math.min(1, Math.abs(car.speed) / 120) * (car.speed < 0 ? -1 : 1);
+  // Rain makes the roads slick: less grip, wider turns.
+  const grip = weather && weather.raining ? CAR.slickGrip : 1;
+  const turnRate = CAR.turnRate * grip * (car.drifting ? CAR.driftTurn : 1);
+  const turn = steer * turnRate * dt * Math.min(1, Math.abs(car.speed) / 120) * (car.speed < 0 ? -1 : 1);
   car.angle += turn;
   const nx = car.x + Math.cos(car.angle) * car.speed * dt;
   const ny = car.y + Math.sin(car.angle) * car.speed * dt;
@@ -61,24 +67,58 @@ export function createTraffic(random, count) {
     const rx = xs[Math.floor(random() * xs.length)];
     const ry = ys[Math.floor(random() * ys.length)];
     const dir = random() < 0.5 ? 1 : -1;
+    const cruise = 110 + random() * 70;
     cars.push({
       id: 1000 + i,
       x: vertical ? rx + (dir > 0 ? 22 : -22) : rx + (random() - 0.5) * 300,
       y: vertical ? ry + (random() - 0.5) * 300 : ry + (dir > 0 ? 22 : -22),
       angle: vertical ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI),
-      speed: 110 + random() * 70,
+      speed: cruise,
+      cruise,
       vertical, dir,
-      color: ['#e8533f', '#3f8fe8', '#f2c94c', '#7ec850', '#b8bcc4', '#c65df0', '#e8e8e8'][Math.floor(random() * 7)],
+      color: pick(random, ['#e8533f', '#3f8fe8', '#f2c94c', '#7ec850', '#b8bcc4', '#c65df0', '#e8e8e8']),
       model: 'City Car', topSpeed: 220, health: 100, parked: false, driver: 'traffic', stolen: false,
+      startled: 0, slowTimer: 0,
     });
   }
   return cars;
 }
 
-export function stepTrafficCar(car, dt, random) {
+export function stepTrafficCar(car, dt, random, others) {
   // Cruise along the current road; at an intersection, sometimes turn onto the cross road.
   const xs = roadXs();
   const ys = roadYs();
+  // Don't rear-end the car ahead: brake when something is close in front.
+  let targetSpeed = car.speed;
+  if (others) {
+    for (const other of others) {
+      if (other === car) continue;
+      const dx = other.x - car.x;
+      const dy = other.y - car.y;
+      const ahead = car.vertical ? dy * car.dir : dx * car.dir;
+      const lateral = car.vertical ? Math.abs(dx) : Math.abs(dy);
+      if (ahead > 0 && ahead < 80 && lateral < 30) {
+        targetSpeed = Math.min(targetSpeed, (other.speed || 0) * 0.8);
+        car.slowTimer = 0.5;
+      }
+      // A police cruiser with lights on makes traffic pull over and slow down.
+      if (other.driver === 'police' && Math.hypot(dx, dy) < 170) {
+        targetSpeed = Math.min(targetSpeed, 60);
+        car.slowTimer = 0.8;
+      }
+    }
+  }
+  if (car.slowTimer > 0) {
+    car.slowTimer -= dt;
+    car.speed += (targetSpeed - car.speed) * dt * 3;
+  } else if (car.startled > 0) {
+    // Startled by a horn: a short burst of speed, then back to cruising.
+    car.startled -= dt;
+    car.speed = Math.min(car.topSpeed + 60, car.speed + 260 * dt);
+  } else {
+    // Nothing ahead: ease back to cruising speed.
+    car.speed += ((car.cruise || 150) - car.speed) * dt * 0.8;
+  }
   const step = car.speed * dt * car.dir;
   if (car.vertical) car.y += step;
   else car.x += step;
@@ -122,14 +162,22 @@ export function createPedestrians(random, count) {
       y: ry + (random() - 0.5) * 200,
       angle: random() * Math.PI * 2,
       speed: 40 + random() * 40,
-      color: colors[Math.floor(random() * colors.length)],
+      color: pick(random, colors),
       walkPhase: random() * Math.PI * 2,
       fleeing: false,
       fleeTimer: 0,
       changeTimer: 2 + random() * 4,
+      health: 100,
     });
   }
   return peds;
+}
+
+// A horn blast startles nearby traffic into a short burst of speed.
+export function startleTraffic(traffic, x, y, radius) {
+  for (const car of traffic) {
+    if (Math.hypot(car.x - x, car.y - y) < radius) car.startled = 1.2;
+  }
 }
 
 export function stepPedestrian(ped, dt, random, city, player) {

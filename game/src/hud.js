@@ -1,7 +1,8 @@
 // The HUD: cash, health, wanted stars, speed, mission objective, messages and
 // the minimap. Drawn in screen space (1280 x 720) on top of the world view.
-import { FIELD, FONT, PACKAGES_TOTAL, PALETTE, WORLD } from './config.js';
-import { MISSION_DEFS, RACE, objectiveText } from './missions.js';
+import { FIELD, FONT, PACKAGES_TOTAL, PALETTE, SITES, WORLD } from './config.js';
+import { MISSION_DEFS, RACE, objectiveText, taxiObjective } from './missions.js';
+import { districtAt, nearSite } from './world.js';
 
 const MM = { x: FIELD.width - 236, y: 16, w: 220, h: 164 };
 
@@ -64,6 +65,36 @@ export function drawMinimap(ctx, state, city) {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
+  // Taxi passenger (cyan) and drop-off (cyan ring).
+  const taxi = state.missions.taxi;
+  if (taxi.active) {
+    const tx = taxi.phase === 'pickup' ? taxi.px : taxi.dx;
+    const ty = taxi.phase === 'pickup' ? taxi.py : taxi.dy;
+    ctx.fillStyle = PALETTE.taxi;
+    ctx.beginPath();
+    ctx.arc(MM.x + tx * sx, MM.y + ty * sy, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Garage (green G), hospital (white cross) and roadblocks (orange).
+  ctx.font = 'bold 9px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.garage;
+  ctx.fillText('G', MM.x + SITES.garage.x * sx, MM.y + SITES.garage.y * sy + 3);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('+', MM.x + SITES.hospital.x * sx, MM.y + SITES.hospital.y * sy + 3);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = PALETTE.roadblock;
+  for (const rb of state.police.roadblocks) {
+    ctx.fillRect(MM.x + rb.x * sx - 3, MM.y + rb.y * sy - 3, 6, 6);
+  }
+  // Police helicopter (red ring) when it is overhead.
+  if (state.police.heli) {
+    ctx.strokeStyle = PALETTE.heli;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(MM.x + state.police.heli.x * sx, MM.y + state.police.heli.y * sy, 6, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   // Police (blue) and player (yellow, with a direction tick).
   ctx.fillStyle = '#3b82f6';
   for (const car of state.police.cars) {
@@ -84,7 +115,10 @@ export function drawMinimap(ctx, state, city) {
 export function currentObjectivePos(state) {
   const m = state.missions;
   if (m.race.active) return RACE.checkpoints[m.race.checkpoint];
-  if (!m.active || m.index >= MISSION_DEFS.length) return null;
+  if (!m.active || m.index >= MISSION_DEFS.length) {
+    const taxi = taxiObjective(m);
+    return taxi ? { x: taxi.x, y: taxi.y } : null;
+  }
   const step = MISSION_DEFS[m.index].steps[m.step];
   if (!step) return null;
   if (step.kind === 'escape') return null;
@@ -114,6 +148,13 @@ export function drawHud(ctx, state, time) {
   ctx.fillStyle = '#fff';
   ctx.font = `13px ${FONT}`;
   ctx.fillText('HEALTH', 214, 79);
+  // Stamina bar, on foot only: sprinting drains it, walking refills it.
+  if (!state.player.inCar) {
+    ctx.fillStyle = '#1f2937';
+    ctx.fillRect(26, 98, 180, 8);
+    ctx.fillStyle = state.player.stamina > 25 ? '#38bdf8' : '#f97316';
+    ctx.fillRect(26, 98, 180 * Math.max(0, state.player.stamina / 100), 8);
+  }
   stars(ctx, state.wanted, 330, 18, 26);
   ctx.font = `bold 15px ${FONT}`;
   ctx.fillStyle = state.wanted > 0 ? '#ff6b6b' : '#94a3b8';
@@ -137,6 +178,49 @@ export function drawHud(ctx, state, time) {
   ctx.textAlign = 'center';
   ctx.fillText(obj, FIELD.width / 2, 59);
   ctx.textAlign = 'left';
+  // District name, under the objective: Rico always knows where he is.
+  const px0 = state.player.inCar ? state.player.inCar.x : state.player.x;
+  const py0 = state.player.inCar ? state.player.inCar.y : state.player.y;
+  ctx.font = `15px ${FONT}`;
+  ctx.fillStyle = '#cbd5e1';
+  ctx.textAlign = 'center';
+  ctx.fillText(districtAt(px0, py0), FIELD.width / 2, 90);
+  ctx.textAlign = 'left';
+  // Taxi job line, when a fare is running.
+  const taxi = taxiObjective(state.missions);
+  if (taxi) {
+    ctx.font = `bold 17px ${FONT}`;
+    ctx.fillStyle = PALETTE.taxi;
+    ctx.textAlign = 'center';
+    ctx.fillText(`TAXI: ${taxi.text} — ${Math.ceil(state.missions.taxi.timer)}s`, FIELD.width / 2, 134);
+    ctx.textAlign = 'left';
+  }
+  // Garage / hospital prompt when Rico is in range and can pay.
+  const nearGarage = state.player.inCar && nearSite('garage', px0, py0);
+  const nearHospital = !state.player.inCar && nearSite('hospital', px0, py0);
+  if (nearGarage && state.player.inCar.health < 100) {
+    ctx.font = `bold 17px ${FONT}`;
+    ctx.fillStyle = PALETTE.garage;
+    ctx.textAlign = 'center';
+    ctx.fillText('G — Repair this car for $50', FIELD.width / 2, 156);
+    ctx.textAlign = 'left';
+  } else if (nearHospital && state.player.health < 100) {
+    ctx.font = `bold 17px ${FONT}`;
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText('G — Patch up at Bay General for $30', FIELD.width / 2, 156);
+    ctx.textAlign = 'left';
+  }
+  // Event feed: the last few things that happened, bottom-right.
+  if (state.feed && state.feed.length > 0) {
+    ctx.font = `14px ${FONT}`;
+    ctx.textAlign = 'right';
+    state.feed.slice(-3).forEach((line, i) => {
+      ctx.fillStyle = `rgba(255,255,255,${0.9 - i * 0.25})`;
+      ctx.fillText(line, FIELD.width - 16, FIELD.height - 196 + i * 20);
+    });
+    ctx.textAlign = 'left';
+  }
   // Speed + car health, bottom-left when driving.
   if (state.player.inCar) {
     const car = state.player.inCar;
@@ -152,6 +236,10 @@ export function drawHud(ctx, state, time) {
     ctx.font = `bold 15px ${FONT}`;
     ctx.fillStyle = '#ffd23f';
     ctx.fillText(car.model.toUpperCase(), 26, FIELD.height - 40);
+    if (car.drifting) {
+      ctx.fillStyle = '#fb923c';
+      ctx.fillText('DRIFT!', 150, FIELD.height - 58);
+    }
     ctx.fillStyle = '#1f2937';
     ctx.fillRect(150, FIELD.height - 38, 70, 10);
     ctx.fillStyle = car.health > 30 ? PALETTE.health : PALETTE.healthLow;
@@ -159,14 +247,14 @@ export function drawHud(ctx, state, time) {
   } else {
     ctx.font = `15px ${FONT}`;
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillText('E — enter car   Q — punch   M — mission   R — race   P — pause', 16, FIELD.height - 28);
+    ctx.fillText('E — car   Q — punch   M — mission   R — race   T — taxi   G — repair   C — horn   H — help   P — pause', 16, FIELD.height - 28);
   }
   // Race timer.
   if (state.missions.race.active) {
     ctx.font = `bold 22px ${FONT}`;
     ctx.fillStyle = '#ffd23f';
     ctx.textAlign = 'center';
-    ctx.fillText(`RACE ${state.missions.race.timer.toFixed(1)}s — checkpoint ${state.missions.race.checkpoint + 1}/4`, FIELD.width / 2, 92);
+    ctx.fillText(`RACE ${state.missions.race.timer.toFixed(1)}s — checkpoint ${state.missions.race.checkpoint + 1}/4`, FIELD.width / 2, 112);
     ctx.textAlign = 'left';
   }
   // Mission countdown.
@@ -174,7 +262,7 @@ export function drawHud(ctx, state, time) {
     ctx.font = `bold 22px ${FONT}`;
     ctx.fillStyle = state.missions.timer < 30 ? '#ff6b6b' : '#fff';
     ctx.textAlign = 'center';
-    ctx.fillText(`⏱ ${Math.ceil(state.missions.timer)}s`, FIELD.width / 2, 92);
+    ctx.fillText(`⏱ ${Math.ceil(state.missions.timer)}s`, FIELD.width / 2, 112);
     ctx.textAlign = 'left';
   }
   // Toast message.

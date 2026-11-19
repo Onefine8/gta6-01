@@ -9,6 +9,10 @@ export const ACTION_PAUSE = 8;
 export const ACTION_CONFIRM = 16;
 export const ACTION_MUTE = 32;
 export const ACTION_RACE = 64;
+export const ACTION_HORN = 128;
+export const ACTION_HELP = 256;
+export const ACTION_REPAIR = 512;
+export const ACTION_TAXI = 1024;
 
 const UP = new Set(['ArrowUp', 'KeyW']);
 const DOWN = new Set(['ArrowDown', 'KeyS']);
@@ -22,10 +26,15 @@ const CONFIRM = new Set(['Space', 'Enter']);
 const MUTE = new Set(['KeyN']);
 const RACE = new Set(['KeyR']);
 const RUN = new Set(['ShiftLeft', 'ShiftRight']);
+const HELP = new Set(['KeyH']);
+const REPAIR = new Set(['KeyG']);
+const TAXI = new Set(['KeyT']);
+const HORN = new Set(['KeyC']);
 
 export function createInput(target) {
   const keys = new Set();
   let actions = 0;
+  let zoomLevel = 0;
   const touch = { up: false, down: false, left: false, right: false, run: false };
 
   function press(code) {
@@ -36,6 +45,9 @@ export function createInput(target) {
     else if (CONFIRM.has(code)) actions |= ACTION_CONFIRM;
     else if (MUTE.has(code)) actions |= ACTION_MUTE;
     else if (RACE.has(code)) actions |= ACTION_RACE;
+    else if (HELP.has(code)) actions |= ACTION_HELP;
+    else if (REPAIR.has(code)) actions |= ACTION_REPAIR;
+    else if (TAXI.has(code)) actions |= ACTION_TAXI;
   }
 
   window.addEventListener('keydown', (event) => {
@@ -44,7 +56,8 @@ export function createInput(target) {
     if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)
       || ENTER.has(event.code) || PUNCH.has(event.code) || MISSION.has(event.code)
       || PAUSE.has(event.code) || CONFIRM.has(event.code) || MUTE.has(event.code)
-      || RACE.has(event.code) || RUN.has(event.code)) {
+      || RACE.has(event.code) || RUN.has(event.code) || HELP.has(event.code)
+      || REPAIR.has(event.code) || TAXI.has(event.code) || HORN.has(event.code)) {
       event.preventDefault();
     }
     press(event.code);
@@ -52,11 +65,26 @@ export function createInput(target) {
   window.addEventListener('keyup', (event) => keys.delete(event.code));
   window.addEventListener('blur', () => keys.clear());
   target.addEventListener('pointerdown', () => { actions |= ACTION_CONFIRM; });
+  // Mouse wheel zooms the camera in and out (three steps); the game never
+  // scrolls the page, so the wheel is free for the camera.
+  target.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    zoomLevel = Math.max(0, Math.min(2, zoomLevel + (event.deltaY < 0 ? 1 : -1)));
+  }, { passive: false });
 
   // On-screen touch buttons (shown on coarse pointers): data-touch names the key.
   for (const btn of document.querySelectorAll('[data-touch]')) {
     const name = btn.getAttribute('data-touch');
-    const on = (e) => { e.preventDefault(); touch[name] = true; if (name === 'enter') actions |= ACTION_ENTER; if (name === 'punch') actions |= ACTION_PUNCH; };
+    const on = (e) => {
+      e.preventDefault();
+      touch[name] = true;
+      if (name === 'enter') actions |= ACTION_ENTER;
+      if (name === 'punch') actions |= ACTION_PUNCH;
+      if (name === 'race') actions |= ACTION_RACE;
+      if (name === 'mission') actions |= ACTION_MISSION;
+      if (name === 'repair') actions |= ACTION_REPAIR;
+      if (name === 'help') actions |= ACTION_HELP;
+    };
     const off = (e) => { e.preventDefault(); touch[name] = false; };
     btn.addEventListener('pointerdown', on);
     btn.addEventListener('pointerup', off);
@@ -88,6 +116,9 @@ export function createInput(target) {
       return (has(RIGHT) || touch.right ? 1 : 0) - (has(LEFT) || touch.left ? 1 : 0);
     },
     brake() { return keys.has('Space'); },
+    // Horn is held, not queued: C (or the horn button) toots while held.
+    horn() { return has(HORN); },
+    zoomLevel() { return zoomLevel; },
     takeActions() {
       const taken = actions;
       actions = 0;

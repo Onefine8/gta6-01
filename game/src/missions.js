@@ -41,6 +41,20 @@ export const MISSION_DEFS = [
       { kind: 'goto', text: 'Meet Dante at Palmetto Park', x: 1400, y: 1000, radius: 110 },
     ],
   },
+  {
+    id: 4,
+    title: 'Harbor Heist',
+    giver: 'Dante',
+    intro: 'Dante: "Last job, Rico — the big one. Take the Harbor Van from the market, run it to Lighthouse Point, then vanish. The whole precinct will be looking for that van."',
+    reward: 2000,
+    failText: 'The van never made it. Dante is done with you.',
+    timeLimit: 180,
+    steps: [
+      { kind: 'steal', model: 'Harbor Van', text: 'Steal the Harbor Van near Harbor Market', x: 360, y: 2060, radius: 120 },
+      { kind: 'goto', text: 'Deliver the van to Lighthouse Point', x: 2960, y: 2060, radius: 110, needCar: true },
+      { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
+    ],
+  },
 ];
 
 export const RACE = {
@@ -55,6 +69,19 @@ export const RACE = {
   prize: 600,
 };
 
+// Taxi side job: pick up a fare anywhere in the city and drop them off.
+// Repeatable, pays by distance, and runs alongside the story missions.
+export const TAXI_STOPS = [
+  { x: 400, y: 400, name: 'Marina Garage' },
+  { x: 2800, y: 400, name: 'Coral Hotel' },
+  { x: 400, y: 2000, name: 'Harbor Market' },
+  { x: 2800, y: 2000, name: 'Lighthouse Point' },
+  { x: 1400, y: 1000, name: 'Palmetto Park' },
+  { x: 2000, y: 1200, name: 'Downtown' },
+  { x: 1200, y: 2000, name: 'Bay General Hospital' },
+  { x: 2000, y: 400, name: '5th Avenue' },
+];
+
 export function createMissionState() {
   return {
     index: 0, // which mission of MISSION_DEFS is active (0-based); >= length = story done
@@ -67,6 +94,7 @@ export function createMissionState() {
     failText: '',
     done: false,
     race: { active: false, checkpoint: 0, timer: 0, best: null },
+    taxi: { active: false, phase: '', px: 0, py: 0, dx: 0, dy: 0, name: '', timer: 0, fare: 0 },
     packagesFound: 0,
     message: '',
     messageTimer: 0,
@@ -127,9 +155,14 @@ export function stepMissions(missions, state, dt, events) {
   const px = state.player.inCar ? state.player.inCar.x : state.player.x;
   const py = state.player.inCar ? state.player.inCar.y : state.player.y;
   if (step.kind === 'steal') {
-    if (events.stolenCar) {
+    // The step advances only when Rico is actually driving the right car —
+    // any old stolen car does not count.
+    const wantModel = step.model || 'Sunset Coupe';
+    if (state.player.inCar && state.player.inCar.model === wantModel) {
       missions.step += 1;
-      showMessage(missions, 'Got the coupe. Now get it to Marina Garage.', 3);
+      showMessage(missions, `Got the ${wantModel}. Now get it where it needs to go.`, 3);
+    } else if (events.stolenCar && state.player.inCar && state.player.inCar.model !== wantModel) {
+      showMessage(missions, `Wrong car — the job needs a ${wantModel}.`, 3);
     }
   } else if (step.kind === 'goto') {
     const d = Math.hypot(px - step.x, py - step.y);
@@ -141,7 +174,9 @@ export function stepMissions(missions, state, dt, events) {
   } else if (step.kind === 'escape') {
     if (state.wanted === 0) {
       missions.step += 1;
-      showMessage(missions, 'Clean. Now meet Dante at the park.', 3);
+      // An escape as the final step completes the mission (mission 4 ends here).
+      if (missions.step >= def.steps.length) completeMission(missions, state, def);
+      else showMessage(missions, 'Clean. Now meet Dante at the park.', 3);
     }
   }
   // The getaway car must survive mission 1.
@@ -156,8 +191,15 @@ export function completeMission(missions, state, def) {
   missions.active = false;
   missions.done = true;
   missions.index += 1;
-  state.player.money += def.reward;
-  showMessage(missions, `${def.title} complete! +$${def.reward}`, 5);
+  let reward = def.reward;
+  // Mission 1 pays a clean-delivery bonus when the coupe arrives unscratched.
+  if (def.id === 1 && state.player.inCar && state.player.inCar.health >= 80) {
+    reward += 100;
+    showMessage(missions, `${def.title} complete! +$${reward} (includes $100 clean-delivery bonus)`, 5);
+  } else {
+    showMessage(missions, `${def.title} complete! +$${reward}`, 5);
+  }
+  state.player.money += reward;
 }
 
 export function startRace(missions) {
@@ -165,6 +207,62 @@ export function startRace(missions) {
   missions.race.checkpoint = 0;
   missions.race.timer = 0;
   showMessage(missions, 'Palmetto GP started! Hit all 4 checkpoints — fastest lap wins $600.', 4);
+}
+
+export function startTaxi(missions, state, random) {
+  const taxi = missions.taxi;
+  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
+  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+  // Pick a pickup stop that is not right on top of Rico, then a different drop-off.
+  const stops = TAXI_STOPS.filter((s) => Math.hypot(s.x - px, s.y - py) > 300);
+  const pickup = stops[Math.floor(random() * stops.length)] || TAXI_STOPS[0];
+  let drop = TAXI_STOPS[Math.floor(random() * TAXI_STOPS.length)];
+  while (drop === pickup) drop = TAXI_STOPS[Math.floor(random() * TAXI_STOPS.length)];
+  taxi.active = true;
+  taxi.phase = 'pickup';
+  taxi.px = pickup.x;
+  taxi.py = pickup.y;
+  taxi.dx = drop.x;
+  taxi.dy = drop.y;
+  taxi.name = drop.name;
+  taxi.timer = 30;
+  taxi.fare = 0;
+  showMessage(missions, `Taxi fare: pick up the passenger at ${pickup.name}.`, 4);
+  return taxi;
+}
+
+export function taxiObjective(missions) {
+  const taxi = missions.taxi;
+  if (!taxi.active) return null;
+  if (taxi.phase === 'pickup') return { x: taxi.px, y: taxi.py, text: 'Pick up the taxi passenger' };
+  return { x: taxi.dx, y: taxi.dy, text: `Drop the passenger at ${taxi.name}` };
+}
+
+export function stepTaxi(missions, state, dt) {
+  const taxi = missions.taxi;
+  if (!taxi.active) return;
+  taxi.timer -= dt;
+  if (taxi.timer <= 0) {
+    taxi.active = false;
+    showMessage(missions, 'The passenger gave up waiting — fare lost.', 3);
+    return;
+  }
+  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
+  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+  if (taxi.phase === 'pickup') {
+    if (Math.hypot(px - taxi.px, py - taxi.py) < 90) {
+      taxi.phase = 'dropoff';
+      taxi.timer = 90;
+      const dist = Math.hypot(taxi.dx - taxi.px, taxi.dy - taxi.py);
+      taxi.fare = Math.round(60 + dist * 0.055);
+      showMessage(missions, `Passenger aboard — take them to ${taxi.name} ($${taxi.fare}).`, 4);
+    }
+  } else if (Math.hypot(px - taxi.dx, py - taxi.dy) < 110) {
+    taxi.active = false;
+    state.player.money += taxi.fare;
+    state.stats.taxis = (state.stats.taxis || 0) + 1;
+    showMessage(missions, `Fare complete! +$${taxi.fare}`, 4);
+  }
 }
 
 export function stepRace(missions, state, dt) {

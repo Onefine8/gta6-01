@@ -23,6 +23,41 @@ export const PLAYER = {
   punchRange: 34,
   punchDamage: 34,
   punchCooldown: 0.45,
+  stamina: 100,
+  staminaDrain: 24,
+  staminaRegen: 16,
+  healthRegenDelay: 8,
+  healthRegenRate: 3,
+};
+
+// Places that do something: the garage repairs cars, the hospital heals Rico,
+// the precinct is where busted players wake up.
+export const SITES = {
+  garage: { x: 400, y: 360, radius: 130, name: 'Marina Garage' },
+  hospital: { x: 2400, y: 1960, radius: 130, name: 'Bay General Hospital' },
+  precinct: { x: 1200, y: 360, radius: 110, name: 'PBPD Precinct 2' },
+};
+export const REPAIR_COST = 50;
+export const HEAL_COST = 30;
+
+// Named districts, shown in the HUD as Rico crosses the city.
+export const DISTRICTS = [
+  { name: 'Marina District', x0: 0, y0: 0, x1: 1200, y1: 800 },
+  { name: 'Coral Heights', x0: 2400, y0: 0, x1: 3200, y1: 800 },
+  { name: 'Old Town', x0: 0, y0: 800, x1: 1200, y1: 1600 },
+  { name: 'Palmetto Park', x0: 1200, y0: 800, x1: 2000, y1: 1200 },
+  { name: 'Downtown', x0: 2000, y0: 800, x1: 3200, y1: 1600 },
+  { name: 'Harbor Market', x0: 0, y0: 1600, x1: 1200, y1: 2220 },
+  { name: 'Lighthouse Point', x0: 2400, y0: 1600, x1: 3200, y1: 2220 },
+  { name: 'Beachfront', x0: 0, y0: 2220, x1: 3200, y1: 2400 },
+];
+
+// Taxi side job: a fare pays a base amount plus distance.
+export const TAXI = {
+  baseFare: 60,
+  perUnit: 0.055,
+  waitSeconds: 30,
+  nearMissBonus: 25,
 };
 
 export const CAR = {
@@ -36,6 +71,8 @@ export const CAR = {
   turnRate: 2.6,
   drag: 0.55,
   health: 100,
+  driftTurn: 1.7,
+  slickGrip: 0.75,
 };
 
 export const WANTED = {
@@ -45,6 +82,10 @@ export const WANTED = {
   hitPedStars: 2,
   maxPolice: [0, 2, 3, 4, 5, 6],
   policeSpeed: [0, 300, 330, 360, 390, 420],
+  roadblockStars: 3,
+  maxRoadblocks: 2,
+  roadblockCooldown: 25,
+  heliStars: 4,
 };
 
 export const TIME = {
@@ -63,6 +104,8 @@ export const VEHICLE_MODELS = [
   { name: 'Coral Pickup', color: '#7ec850', top: 520 },
   { name: 'Harbor Van', color: '#b8bcc4', top: 470 },
   { name: 'Neon GT', color: '#c65df0', top: 620 },
+  { name: 'Sunset Roadster', color: '#ff8c42', top: 640 },
+  { name: 'Harbor Tow', color: '#8a9a5b', top: 450 },
 ];
 
 export const PALETTE = {
@@ -84,6 +127,12 @@ export const PALETTE = {
   playerShirt: '#e8533f',
   police: '#1d4ed8',
   policeLight: '#ff3b30',
+  heli: '#dc2626',
+  roadblock: '#f97316',
+  garage: '#4ade80',
+  hospital: '#f8fafc',
+  taxi: '#22d3ee',
+  skid: 'rgba(20,20,24,0.55)',
   text: '#ffffff',
   darkText: '#10141b',
   panel: 'rgba(12,16,24,0.88)',

@@ -7,8 +7,24 @@ export function createPlayer(x, y) {
   return {
     x, y, angle: -Math.PI / 2, vx: 0, vy: 0,
     health: PLAYER.health, money: 250, moving: false, running: false,
-    punchTimer: 0, punchAnim: 0, inCar: null, invulnerable: 0,
+    stamina: PLAYER.stamina, hurtTimer: 0,
+    punchTimer: 0, punchAnim: 0, punchCombo: 0, punchComboTimer: 0,
+    inCar: null, invulnerable: 0,
   };
+}
+
+// One place for all damage to Rico: it resets the health-regen clock and
+// reports whether he went down, so police, crashes and falls agree.
+export function damagePlayer(player, amount) {
+  if (player.invulnerable > 0 || player.health <= 0) return false;
+  player.health = Math.max(0, player.health - amount);
+  player.hurtTimer = PLAYER.healthRegenDelay;
+  player.invulnerable = 0.6;
+  return player.health <= 0;
+}
+
+export function healPlayer(player, amount) {
+  player.health = Math.min(PLAYER.health, player.health + amount);
 }
 
 export function stepPlayer(player, input, dt, city) {
@@ -17,7 +33,11 @@ export function stepPlayer(player, input, dt, city) {
   const my = input.moveY();
   const len = Math.hypot(mx, my);
   player.moving = len > 0.01;
-  player.running = input.run() && player.moving;
+  // Sprinting drains stamina; an empty tank forces a walk until it recovers.
+  const wantRun = input.run() && player.moving;
+  player.running = wantRun && player.stamina > 1;
+  if (player.running) player.stamina = Math.max(0, player.stamina - PLAYER.staminaDrain * dt);
+  else player.stamina = Math.min(PLAYER.stamina, player.stamina + PLAYER.staminaRegen * dt);
   const speed = player.running ? PLAYER.runSpeed : PLAYER.walkSpeed;
   let nx = player.x;
   let ny = player.y;
@@ -38,7 +58,16 @@ export function stepPlayer(player, input, dt, city) {
   }
   if (player.punchTimer > 0) player.punchTimer -= dt;
   if (player.punchAnim > 0) player.punchAnim -= dt;
+  if (player.punchComboTimer > 0) {
+    player.punchComboTimer -= dt;
+    if (player.punchComboTimer <= 0) player.punchCombo = 0;
+  }
   if (player.invulnerable > 0) player.invulnerable -= dt;
+  // Health creeps back once Rico has been out of trouble for a while.
+  if (player.hurtTimer > 0) player.hurtTimer -= dt;
+  else if (player.health > 0 && player.health < PLAYER.health) {
+    healPlayer(player, PLAYER.healthRegenRate * dt);
+  }
 }
 
 export function nearestCar(player, cars, maxDist) {
@@ -81,6 +110,9 @@ export function punch(player, peds) {
   if (player.punchTimer > 0 || player.inCar) return null;
   player.punchTimer = PLAYER.punchCooldown;
   player.punchAnim = 0.22;
+  // Chained punches build a combo (up to 3) that hits harder each time.
+  player.punchCombo = player.punchComboTimer > 0 ? Math.min(3, player.punchCombo + 1) : 1;
+  player.punchComboTimer = 0.9;
   const px = player.x + Math.cos(player.angle) * PLAYER.punchRange;
   const py = player.y + Math.sin(player.angle) * PLAYER.punchRange;
   for (const ped of peds) {
@@ -88,6 +120,11 @@ export function punch(player, peds) {
     if (Math.hypot(ped.x - px, ped.y - py) < 30) {
       ped.fleeing = true;
       ped.fleeTimer = 4;
+      // Knockback: the pedestrian stumbles away from Rico.
+      const away = Math.atan2(ped.y - player.y, ped.x - player.x);
+      ped.x += Math.cos(away) * (18 + player.punchCombo * 10);
+      ped.y += Math.sin(away) * (18 + player.punchCombo * 10);
+      ped.health = Math.max(0, (ped.health ?? 100) - (PLAYER.punchDamage + player.punchCombo * 10));
       return ped;
     }
   }

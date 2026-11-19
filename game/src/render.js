@@ -17,6 +17,16 @@ export function createRenderer(canvas) {
   const fonts = new Map();
   const rainDrops = [];
   for (let i = 0; i < 160; i += 1) rainDrops.push({ x: Math.random() * FIELD.width, y: Math.random() * FIELD.height, s: 9 + Math.random() * 7 });
+  // Camera state: a smoothed follow point (no snap), a zoom step from the
+  // mouse wheel, and fading skid marks left by drifting cars.
+  const camSmooth = { x: 1600, y: 1100, ready: false };
+  let zoom = 1;
+  const zoomSteps = [1, 1.18, 1.38];
+  const skids = [];
+
+  function setZoom(level) {
+    zoom = zoomSteps[Math.max(0, Math.min(zoomSteps.length - 1, level))] || 1;
+  }
 
   function resize() {
     const ratio = window.devicePixelRatio || 1;
@@ -60,6 +70,25 @@ export function createRenderer(canvas) {
     // Beach + water along the south edge.
     context.fillStyle = PALETTE.sand;
     context.fillRect(x0, Math.max(y0, CITY.beachY), x1 - x0, Math.max(0, Math.min(y1, CITY.waterY) - Math.max(y0, CITY.beachY)));
+    // Beach umbrellas and palms, so the sand is not an empty strip.
+    for (const u of state.city.umbrellas) {
+      if (u.x < x0 || u.x > x1) continue;
+      context.fillStyle = u.color;
+      context.beginPath();
+      context.arc(u.x, u.y, 14, Math.PI, 0);
+      context.fill();
+      context.fillStyle = '#5a4632';
+      context.fillRect(u.x - 1, u.y, 2, 12);
+    }
+    for (const p of state.city.palms || []) {
+      if (p.x < x0 || p.x > x1) continue;
+      context.fillStyle = '#5a4632';
+      context.fillRect(p.x - 2, p.y - 10, 4, 14);
+      context.fillStyle = PALETTE.treeLight;
+      context.beginPath();
+      context.arc(p.x, p.y - 12, p.r, 0, Math.PI * 2);
+      context.fill();
+    }
     context.fillStyle = state.time.isNight ? '#16324a' : PALETTE.water;
     context.fillRect(x0, Math.max(y0, CITY.waterY), x1 - x0, Math.max(0, y1 - Math.max(y0, CITY.waterY)));
     context.fillStyle = 'rgba(255,255,255,0.25)';
@@ -290,9 +319,10 @@ export function createRenderer(canvas) {
     text('PALMETTO BAY HEAT', FIELD.width / 2, 120, 64, '#ffd23f', 'center', TITLE_FONT);
     text('An open-world crime story — steal, drive, race, and outrun the law.', FIELD.width / 2, 168, 20, '#e2e8f0', 'center');
     const lines = [
-      'WASD / Arrows — move & drive    E — enter / exit car    Q — punch',
-      'M — start mission    R — street race    P — pause    N — mute',
-      `Missions done: ${state.missionsDone}   Packages: ${state.missions.packagesFound}/${12}   Best race: ${state.missions.race.best ? state.missions.race.best.toFixed(1) + 's' : '—'}`,
+      'WASD / Arrows — move & drive    E — enter / exit car    Q — punch    C — horn',
+      'M — story mission (4)    R — street race    T — taxi fare    G — repair / heal',
+      'Mouse wheel — zoom camera    H — help    P — pause    N — mute',
+      `Missions done: ${state.missionsDone}   Packages: ${state.missions.packagesFound}/${12}   Best race: ${state.missions.race.best ? state.missions.race.best.toFixed(1) + 's' : '—'}   Taxi fares: ${state.stats ? state.stats.taxis || 0 : 0}`,
       'Save: progress is kept in this browser automatically.',
     ];
     drawPanel(' ', lines, 'Press Space or click to start');
@@ -300,18 +330,73 @@ export function createRenderer(canvas) {
 
   function drawWorld(state) {
     const focus = state.player.inCar || state.player;
+    // Smooth camera with a lookahead in the direction of travel, so the view
+    // leans into the road ahead instead of snapping to the player.
+    if (!camSmooth.ready) {
+      camSmooth.x = focus.x;
+      camSmooth.y = focus.y;
+      camSmooth.ready = true;
+    }
+    const look = state.player.inCar ? Math.min(120, Math.abs(focus.speed) * 0.18) : 0;
+    const lookX = focus.x + Math.cos(focus.angle) * look;
+    const lookY = focus.y + Math.sin(focus.angle) * look;
+    camSmooth.x += (lookX - camSmooth.x) * 0.12;
+    camSmooth.y += (lookY - camSmooth.y) * 0.12;
     const cam = {
-      x: Math.max(FIELD.width / 2 - 60, Math.min(WORLD.width - FIELD.width / 2 + 60, focus.x)),
-      y: Math.max(FIELD.height / 2 - 60, Math.min(WORLD.height - FIELD.height / 2 + 60, focus.y)),
+      x: Math.max(FIELD.width / (2 * zoom), Math.min(WORLD.width - FIELD.width / (2 * zoom), camSmooth.x)),
+      y: Math.max(FIELD.height / (2 * zoom), Math.min(WORLD.height - FIELD.height / (2 * zoom), camSmooth.y)),
     };
-    // Clamp the camera fully inside the world when the world is bigger than the view.
-    cam.x = Math.max(FIELD.width / 2, Math.min(WORLD.width - FIELD.width / 2, focus.x));
-    cam.y = Math.max(FIELD.height / 2, Math.min(WORLD.height - FIELD.height / 2, focus.y));
     context.save();
-    context.translate(FIELD.width / 2 - cam.x, FIELD.height / 2 - cam.y);
+    context.translate(FIELD.width / (2 * zoom) - cam.x, FIELD.height / (2 * zoom) - cam.y);
     drawGround(state, cam);
     drawBuildings(state, cam);
     drawPackages(state);
+    // Garage + hospital zones, so the player can see where to fix up.
+    context.save();
+    context.strokeStyle = PALETTE.garage;
+    context.setLineDash([10, 8]);
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(400, 360, 130, 0, Math.PI * 2);
+    context.stroke();
+    context.setLineDash([]);
+    context.fillStyle = PALETTE.garage;
+    context.font = `bold 16px ${FONT}`;
+    context.textAlign = 'center';
+    context.fillText('MARINA GARAGE — REPAIRS', 400, 360);
+    context.strokeStyle = '#f8fafc';
+    context.beginPath();
+    context.arc(2400, 1960, 130, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = '#fff';
+    context.fillText('BAY GENERAL — HEALS', 2400, 1960);
+    context.textAlign = 'left';
+    context.restore();
+    // Skid marks left by drifting cars, fading over a few seconds.
+    for (const s of skids) {
+      context.strokeStyle = `rgba(20,20,24,${s.life * 0.5})`;
+      context.lineWidth = 4;
+      context.beginPath();
+      context.moveTo(s.x - Math.cos(s.angle) * 12, s.y - Math.sin(s.angle) * 12);
+      context.lineTo(s.x + Math.cos(s.angle) * 12, s.y + Math.sin(s.angle) * 12);
+      context.stroke();
+    }
+    // Roadblocks: striped barriers across the road with a cruiser behind.
+    for (const rb of state.police.roadblocks) {
+      context.save();
+      context.translate(rb.x, rb.y);
+      context.rotate(rb.angle);
+      context.fillStyle = PALETTE.roadblock;
+      context.fillRect(-40, -8, 80, 16);
+      context.fillStyle = '#fff';
+      for (let bx = -40; bx < 40; bx += 16) context.fillRect(bx, -8, 8, 16);
+      context.restore();
+      context.fillStyle = '#fff';
+      context.font = `bold 12px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('PBPD ROADBLOCK', rb.x, rb.y - 24);
+      context.textAlign = 'left';
+    }
     // Race checkpoints.
     if (state.missions.race.active) {
       const cp = state.raceCheckpoints[state.missions.race.checkpoint];
@@ -348,7 +433,68 @@ export function createRenderer(canvas) {
       }
     } else {
       drawCarShape(state.player.inCar, false);
+      // Headlights at night: a cone of light ahead of the car.
+      if (state.time.isNight) {
+        const car = state.player.inCar;
+        context.save();
+        context.translate(car.x, car.y);
+        context.rotate(car.angle);
+        const grad = context.createLinearGradient(30, 0, 260, 0);
+        grad.addColorStop(0, 'rgba(255,240,180,0.20)');
+        grad.addColorStop(1, 'rgba(255,240,180,0)');
+        context.fillStyle = grad;
+        context.beginPath();
+        context.moveTo(30, -8);
+        context.lineTo(260, -70);
+        context.lineTo(260, 70);
+        context.lineTo(30, 8);
+        context.closePath();
+        context.fill();
+        context.restore();
+      }
+      // A drifting car leaves skid marks on the road.
+      if (state.player.inCar.drifting) {
+        const car = state.player.inCar;
+        skids.push({ x: car.x - Math.cos(car.angle) * 10, y: car.y - Math.sin(car.angle) * 10, angle: car.angle, life: 1 });
+        if (skids.length > 120) skids.shift();
+      }
     }
+    // Police helicopter: shadow, body and rotor overhead, with a searchlight
+    // cone down at the player when it is night.
+    if (state.police.heli) {
+      const h = state.police.heli;
+      context.fillStyle = 'rgba(0,0,0,0.3)';
+      context.beginPath();
+      context.ellipse(h.x + 18, h.y + 24, 26, 12, 0, 0, Math.PI * 2);
+      context.fill();
+      if (state.time.isNight) {
+        context.fillStyle = 'rgba(255,240,180,0.10)';
+        context.beginPath();
+        context.moveTo(h.x, h.y);
+        context.lineTo(state.player.x - 40, state.player.y - 40);
+        context.lineTo(state.player.x + 40, state.player.y + 40);
+        context.closePath();
+        context.fill();
+      }
+      context.fillStyle = PALETTE.heli;
+      context.beginPath();
+      context.arc(h.x, h.y, 16, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = '#fff';
+      context.lineWidth = 3;
+      const rotor = state.elapsed * 30;
+      context.beginPath();
+      context.moveTo(h.x - Math.cos(rotor) * 26, h.y - Math.sin(rotor) * 26);
+      context.lineTo(h.x + Math.cos(rotor) * 26, h.y + Math.sin(rotor) * 26);
+      context.stroke();
+      context.fillStyle = '#fff';
+      context.font = `bold 10px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('PBPD', h.x, h.y + 3);
+      context.textAlign = 'left';
+    }
+    for (const s of skids) s.life -= 0.004;
+    while (skids.length > 0 && skids[0].life <= 0) skids.shift();
     context.restore();
     // Night + rain overlays in screen space.
     if (state.time.isNight) {
@@ -362,7 +508,8 @@ export function createRenderer(canvas) {
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.fillStyle = '#0d1526';
     context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
+    // World space is zoomed; the HUD is drawn afterwards at the base scale.
+    context.setTransform(view.scale * zoom, 0, 0, view.scale * zoom, view.x, view.y);
     context.fillStyle = skyColor(state.time);
     context.fillRect(0, 0, FIELD.width, FIELD.height);
     if (screen === SCREEN_TITLE) {
@@ -370,7 +517,9 @@ export function createRenderer(canvas) {
       return;
     }
     drawWorld(state);
+    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
     drawHud(context, state, state.time);
+    if (state.helpOpen) drawHelp();
     if (screen === SCREEN_PAUSED) {
       drawPanel('Paused', ['The city waits for you.', 'Progress is saved automatically.'], 'Press P to resume');
     } else if (screen === SCREEN_OVER) {
@@ -383,7 +532,34 @@ export function createRenderer(canvas) {
     }
   }
 
+  // Help overlay (H): every control and system on one screen.
+  function drawHelp() {
+    const lines = [
+      'WASD / Arrows — move & drive      Shift — sprint (uses stamina)',
+      'E — enter / exit car      Q — punch (chain for combos)      C — horn',
+      'M — story mission      R — Palmetto GP race      T — taxi fare',
+      'G — repair at Marina Garage ($50) / heal at Bay General ($30)',
+      'Mouse wheel — zoom camera      P — pause      N — mute      H — close',
+      '3+ stars: roadblocks ahead. 4+ stars: a police helicopter watches you.',
+      'Near-miss a car at speed for +$25. Find all 12 hidden packages.',
+    ];
+    const w = 780;
+    const h = 130 + lines.length * 30;
+    const x = (FIELD.width - w) / 2;
+    const y = (FIELD.height - h) / 2;
+    context.fillStyle = PALETTE.panel;
+    context.fillRect(x, y, w, h);
+    context.strokeStyle = PALETTE.panelEdge;
+    context.lineWidth = 3;
+    context.strokeRect(x, y, w, h);
+    text('HOW TO PLAY — PALMETTO BAY', FIELD.width / 2, y + 52, 30, '#ffd23f', 'center', TITLE_FONT);
+    for (let i = 0; i < lines.length; i += 1) {
+      text(lines[i], FIELD.width / 2, y + 100 + i * 30, 17, '#e2e8f0', 'center');
+    }
+    text('Press H to close', FIELD.width / 2, y + h - 24, 17, PALETTE.gold, 'center');
+  }
+
   resize();
   window.addEventListener('resize', resize);
-  return { draw, resize };
+  return { draw, resize, setZoom };
 }

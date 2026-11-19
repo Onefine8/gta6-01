@@ -11,23 +11,34 @@ a park, a beach and a harbour. Explore on foot or steal any parked car and
 drive it: traffic, pedestrians, police cruisers and a wanted level that
 follows you everywhere.
 
-- **Story missions (3):** "Wheels Up" (steal the Sunset Coupe for Marina),
-  "Bayfront Dash" (three timed drops across the city) and "Heat Wave" (lose
-  the police, then meet Dante at the park). Each has an intro, a fail
-  condition and a cash reward.
+- **Story missions (4):** "Wheels Up" (steal the Sunset Coupe for Marina),
+  "Bayfront Dash" (three timed drops across the city), "Heat Wave" (lose
+  the police, then meet Dante at the park) and "Harbor Heist" (steal the
+  Harbor Van, deliver it to Lighthouse Point, then vanish). Each has an
+  intro, a fail condition and a cash reward; a clean delivery in mission 1
+  pays a $100 bonus.
 - **Open world:** driveable stolen cars with handling, collisions and
   damage; traffic and pedestrians; 12 hidden packages to collect; a
-  timed street race (Palmetto GP) with checkpoints and a best lap.
+  timed street race (Palmetto GP) with checkpoints and a best lap; a
+  repeatable taxi job (pick up fares, get paid by distance); near-miss
+  bonuses for flashing past traffic at speed.
 - **Wanted system:** 0–5 stars. Steal a car, hit a pedestrian or punch
-  someone and the PBPD sends cruisers that chase and ram you. Break line
-  of sight and the heat cools off — or get busted and pay bail.
-- **Living city:** day/night cycle, rain, a minimap with the mission
-  objective, cash, health, speed and a full HUD.
-- **Sound:** synthesized WebAudio engine hum, sirens, a bassline loop and
+  someone and the PBPD sends cruisers that chase, ram and PIT you. At 3+
+  stars they set roadblocks ahead of you; at 4+ a helicopter circles
+  overhead and never loses sight of you. Break line of sight and the heat
+  cools off — or get busted and pay bail.
+- **Living city:** day/night cycle, rain that makes the roads slick, a
+  minimap with the mission objective, cash, health, stamina, speed and a
+  full HUD. Marina Garage repairs cars ($50), Bay General heals Rico
+  ($30). Sprinting drains stamina; health creeps back out of trouble.
+- **Sound:** synthesized WebAudio engine hum, sirens, a helicopter rotor,
+  a bassline loop with a second phrase, horn, skid and repair sounds, and
   effects — no audio files.
 - **Controls:** WASD/arrows to move and drive, E to enter/exit a car,
-  Q to punch, M for missions, R for the race, P to pause, N to mute.
-  Touch buttons appear on mobile. Progress saves to localStorage.
+  Q to punch, C to honk, M for missions, R for the race, T for a taxi fare,
+  G to repair/heal, H for help, mouse wheel to zoom the camera, P to
+  pause, N to mute. Touch buttons appear on mobile. Progress saves to
+  localStorage.
 
 ## Run it
 

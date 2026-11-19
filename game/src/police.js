@@ -5,7 +5,7 @@ import { WANTED, WORLD } from './config.js';
 import { nearestRoadPoint } from './world.js';
 
 export function createPolice() {
-  return { cars: [], spawnTimer: 0, seenTimer: 0, nextId: 1 };
+  return { cars: [], spawnTimer: 0, seenTimer: 0, nextId: 1, roadblocks: [], roadblockTimer: 18, heli: null, pitTimer: 0 };
 }
 
 export function addWanted(state, stars) {
@@ -39,11 +39,60 @@ export function stepPolice(police, state, dt, random) {
   }
   // Too many cruisers for the current heat: the extras peel off and despawn.
   while (police.cars.length > want) police.cars.pop();
-  let seen = false;
+  // At 3+ stars the PBPD sets roadblocks ahead of the player on his road.
+  police.roadblockTimer -= dt;
+  if (state.wanted >= WANTED.roadblockStars && police.roadblocks.length < WANTED.maxRoadblocks && police.roadblockTimer <= 0) {
+    police.roadblockTimer = WANTED.roadblockCooldown;
+    const fx = state.player.inCar ? Math.cos(state.player.inCar.angle) : Math.cos(state.player.angle);
+    const fy = state.player.inCar ? Math.sin(state.player.inCar.angle) : Math.sin(state.player.angle);
+    const ahead = nearestRoadPoint(target.x + fx * 520, target.y + fy * 520);
+    police.roadblocks.push({
+      x: Math.max(60, Math.min(WORLD.width - 60, ahead.x)),
+      y: Math.max(60, Math.min(WORLD.height - 60, ahead.y)),
+      angle: Math.atan2(fy, fx) + Math.PI / 2,
+      timer: 30,
+    });
+  }
+  for (const rb of police.roadblocks) rb.timer -= dt;
+  police.roadblocks = police.roadblocks.filter((rb) => rb.timer > 0);
+  // A roadblock is a wall of steel: ramming it at speed wrecks the car.
+  for (const rb of police.roadblocks) {
+    if (state.player.inCar && Math.hypot(state.player.inCar.x - rb.x, state.player.inCar.y - rb.y) < 52) {
+      const pc = state.player.inCar;
+      if (Math.abs(pc.speed) > 120) {
+        pc.health -= 22;
+        pc.speed *= 0.25;
+        state.player.inCar = pc;
+      } else {
+        pc.speed *= 1 - 2.5 * dt;
+      }
+    }
+  }
+  // At 4+ stars a police helicopter circles overhead and never loses sight —
+  // the wanted level cannot cool off while it watches.
+  if (state.wanted >= WANTED.heliStars) {
+    if (!police.heli) police.heli = { angle: 0, x: target.x, y: target.y - 220 };
+    police.heli.angle += dt * 0.55;
+    police.heli.x = target.x + Math.cos(police.heli.angle) * 230;
+    police.heli.y = target.y + Math.sin(police.heli.angle) * 230;
+  } else {
+    police.heli = null;
+  }
+  let seen = !!police.heli;
+  // Predict where the player is going, so cruisers cut him off instead of
+  // trailing forever behind a faster car.
+  const tvx = state.player.inCar
+    ? Math.cos(state.player.inCar.angle) * state.player.inCar.speed
+    : (state.player.vx || 0);
+  const tvy = state.player.inCar
+    ? Math.sin(state.player.inCar.angle) * state.player.inCar.speed
+    : (state.player.vy || 0);
+  const aimX = target.x + tvx * 0.45;
+  const aimY = target.y + tvy * 0.45;
   for (const car of police.cars) {
-    const dx = target.x - car.x;
-    const dy = target.y - car.y;
-    const dist = Math.hypot(dx, dy);
+    const dx = aimX - car.x;
+    const dy = aimY - car.y;
+    const dist = Math.hypot(target.x - car.x, target.y - car.y);
     if (dist < 620) seen = true;
     const wantAngle = Math.atan2(dy, dx);
     let diff = wantAngle - car.angle;
@@ -66,6 +115,21 @@ export function stepPolice(police, state, dt, random) {
         state.busted = true;
       }
     }
+    // PIT maneuver: a cruiser riding alongside for a second shoves the
+    // player's car sideways and spins it, instead of only rear-ending it.
+    if (state.player.inCar && dist >= 44 && dist < 95) {
+      car.pitTimer = (car.pitTimer || 0) + dt;
+      if (car.pitTimer > 1.1) {
+        car.pitTimer = 0;
+        const pc = state.player.inCar;
+        const side = Math.sin(car.angle - pc.angle) >= 0 ? 1 : -1;
+        pc.angle += side * 0.35;
+        pc.speed *= 0.55;
+        pc.health -= 6;
+      }
+    } else {
+      car.pitTimer = 0;
+    }
   }
   if (state.wanted > 0) {
     if (seen) {
@@ -87,4 +151,6 @@ export function clearWanted(state, police) {
   state.wanted = 0;
   state.wantedTimer = WANTED.decaySeconds;
   police.cars = [];
+  police.roadblocks = [];
+  police.heli = null;
 }

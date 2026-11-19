@@ -1,7 +1,26 @@
 // The city of Palmetto Bay: roads on a grid, buildings in the blocks between them,
 // a park, a beach and the harbour water along the south edge. Pure data + geometry
 // helpers — no drawing and no browser in here.
-import { CITY, PACKAGES_TOTAL, PALETTE, VEHICLE_MODELS, WORLD } from './config.js';
+import { CITY, DISTRICTS, PACKAGES_TOTAL, PALETTE, SITES, VEHICLE_MODELS, WORLD } from './config.js';
+import { pick } from './random.js';
+
+export function districtAt(x, y) {
+  for (const d of DISTRICTS) {
+    if (x >= d.x0 && x < d.x1 && y >= d.y0 && y < d.y1) return d.name;
+  }
+  return 'Palmetto Bay';
+}
+
+// Distance from (x, y) to a named site (garage / hospital / precinct).
+export function siteDistance(siteName, x, y) {
+  const s = SITES[siteName];
+  return Math.hypot(x - s.x, y - s.y);
+}
+
+export function nearSite(siteName, x, y) {
+  const s = SITES[siteName];
+  return Math.hypot(x - s.x, y - s.y) < s.radius;
+}
 
 export function roadXs() {
   const xs = [];
@@ -30,6 +49,8 @@ function rectsOverlap(a, b) {
 export function createCity(random) {
   const buildings = [];
   const trees = [];
+  const palms = [];
+  const umbrellas = [];
   const xs = roadXs();
   const ys = roadYs();
   const half = CITY.roadWidth / 2;
@@ -54,7 +75,7 @@ export function createCity(random) {
       const b2 = { x: x0, y: y0 + bh * split + 8, w: bw, h: bh * (1 - split) - 8 };
       for (const b of [b1, b2]) {
         const ci = Math.floor(random() * PALETTE.building.length);
-        buildings.push({ ...b, color: PALETTE.building[ci], roof: PALETTE.roof[ci], name: '' });
+        buildings.push({ ...b, color: pick(random, PALETTE.building), roof: PALETTE.roof[ci], name: '' });
       }
       if (random() < 0.7) trees.push({ x: x0 + 8 + random() * (bw - 16), y: y0 + bh - 14, r: 10 + random() * 6 });
     }
@@ -79,7 +100,15 @@ export function createCity(random) {
   for (let i = 0; i < PACKAGES_TOTAL; i += 1) {
     packages.push({ x: spots[i][0], y: spots[i][1], taken: false });
   }
-  return { buildings, trees, park, packages };
+  // Palm trees and beach umbrellas along the sand, so the beach reads as a beach.
+  for (let x = 120; x < WORLD.width - 100; x += 170) {
+    palms.push({ x: x + pick(random, [-20, 0, 20]), y: CITY.beachY + 24 + random() * 30, r: 11 + random() * 5 });
+  }
+  const umbrellaColors = ['#e8533f', '#f2c94c', '#3f8fe8', '#c65df0', '#7ec850'];
+  for (let i = 0; i < 10; i += 1) {
+    umbrellas.push({ x: 200 + random() * (WORLD.width - 400), y: CITY.beachY + 55 + random() * 40, color: pick(random, umbrellaColors) });
+  }
+  return { buildings, trees, palms, umbrellas, park, packages };
 }
 
 export function collideBuildings(city, x, y, r) {
