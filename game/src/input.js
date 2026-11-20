@@ -14,6 +14,12 @@ export const ACTION_HELP = 256;
 export const ACTION_REPAIR = 512;
 export const ACTION_TAXI = 1024;
 export const ACTION_BUSINESS = 2048;
+export const ACTION_TUNE = 4096;
+export const ACTION_CASINO_SLOTS = 8192;
+export const ACTION_CASINO_BLACKJACK = 16384;
+export const ACTION_CASINO_ROULETTE = 32768;
+export const ACTION_SMUGGLING = 65536;
+export const ACTION_DEALERSHIP = 131072;
 
 const UP = new Set(['ArrowUp', 'KeyW']);
 const DOWN = new Set(['ArrowDown', 'KeyS']);
@@ -31,6 +37,12 @@ const HELP = new Set(['KeyH']);
 const REPAIR = new Set(['KeyG']);
 const TAXI = new Set(['KeyT']);
 const BUSINESS = new Set(['KeyB']);
+const TUNE = new Set(['KeyU']);
+const CASINO_SLOTS = new Set(['KeyV']);
+const CASINO_BLACKJACK = new Set(['KeyJ']);
+const CASINO_ROULETTE = new Set(['KeyK']);
+const SMUGGLING = new Set(['KeyZ']);
+const DEALERSHIP = new Set(['KeyO']);
 const HORN = new Set(['KeyC']);
 
 export function createInput(target) {
@@ -51,6 +63,12 @@ export function createInput(target) {
     else if (REPAIR.has(code)) actions |= ACTION_REPAIR;
     else if (TAXI.has(code)) actions |= ACTION_TAXI;
     else if (BUSINESS.has(code)) actions |= ACTION_BUSINESS;
+    else if (TUNE.has(code)) actions |= ACTION_TUNE;
+    else if (CASINO_SLOTS.has(code)) actions |= ACTION_CASINO_SLOTS;
+    else if (CASINO_BLACKJACK.has(code)) actions |= ACTION_CASINO_BLACKJACK;
+    else if (CASINO_ROULETTE.has(code)) actions |= ACTION_CASINO_ROULETTE;
+    else if (SMUGGLING.has(code)) actions |= ACTION_SMUGGLING;
+    else if (DEALERSHIP.has(code)) actions |= ACTION_DEALERSHIP;
   }
 
   window.addEventListener('keydown', (event) => {
@@ -60,7 +78,10 @@ export function createInput(target) {
       || ENTER.has(event.code) || PUNCH.has(event.code) || MISSION.has(event.code)
       || PAUSE.has(event.code) || CONFIRM.has(event.code) || MUTE.has(event.code)
       || RACE.has(event.code) || RUN.has(event.code) || HELP.has(event.code)
-      || REPAIR.has(event.code) || TAXI.has(event.code) || BUSINESS.has(event.code) || HORN.has(event.code)) {
+      || REPAIR.has(event.code) || TAXI.has(event.code) || BUSINESS.has(event.code) || HORN.has(event.code)
+      || TUNE.has(event.code) || CASINO_SLOTS.has(event.code)
+      || CASINO_BLACKJACK.has(event.code) || CASINO_ROULETTE.has(event.code)
+      || SMUGGLING.has(event.code) || DEALERSHIP.has(event.code)) {
       event.preventDefault();
     }
     press(event.code);

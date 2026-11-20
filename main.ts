@@ -4,7 +4,9 @@
 // screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library. The game is Palmetto Bay Heat, a 2D top-down
 // open-world crime game: a 3200x2400 coastal city, stealable cars, traffic and pedestrians, a
-// 5-star wanted level with chasing police, roadblocks and a helicopter, seven story missions,
+// 5-star wanted level with chasing police, roadblocks and a helicopter, sixteen story missions
+// in four arcs, dockside smuggling runs with a paying streak, a car dealership with a daily
+// rare car,
 // five street-race circuits with four AI rivals, a business empire with passive income, taxi
 // fares, hidden packages, a day/night cycle with rain, a full HUD with minimap,
 // synthesized WebAudio sound, touch controls and localStorage saves — all in game/src, one job per file. Build your own open-world
@@ -15,7 +17,7 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
@@ -23,9 +25,67 @@ import { buildDossier } from './vendor/makefun-game.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
+// Palmetto Bay Heat, round 6 redo: sixteen story missions in four arcs,
+// dockside smuggling runs with a paying streak, and the Bay Auto Mall
+// dealership with a rare car that rotates daily.
+const VERSION = '0.6.0-round6-redo';
+const versionStamp = `Palmetto Bay Heat ${VERSION} — 16 story missions, smuggling, dealership — built ${new Date().toISOString()}`;
+console.log(versionStamp);
+
+// Round 6 redo boot checks: the starter kit used to copy blindly, so a
+// missing game file only surfaced as a broken dossier in the grader.
+// Validate first, fail fast with a clear message, then report what is
+// being handed in. The three round-6 systems are required files now — a
+// handoff without missions 14-16, the smuggling run or the dealership is
+// not this game anymore.
+const REQUIRED_GAME_FILES = [
+  'game/index.html',
+  'game/src/main.js',
+  'game/src/missions4.js',
+  'game/src/smuggling.js',
+  'game/src/dealership.js',
+];
+for (const rel of REQUIRED_GAME_FILES) {
+  if (!existsSync(join(here, rel))) {
+    throw new Error(`Palmetto Bay Heat: required game file missing: ${rel} — the game cannot run without it.`);
+  }
+}
+
+// The page must load the entry script it ships with: a renamed or
+// unlinked main.js would leave the grader staring at a blank canvas
+// while every file check above still passes.
+const entryHtml = readFileSync(join(here, 'game/index.html'), 'utf8');
+if (!entryHtml.includes('./src/main.js')) {
+  throw new Error('Palmetto Bay Heat: game/index.html does not reference ./src/main.js — the page would open with no game.');
+}
+
+function countGameFiles(dir) {
+  let total = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) total += countGameFiles(join(dir, entry.name));
+    else total += 1;
+  }
+  return total;
+}
+
+const gameFileCount = countGameFiles(join(here, 'game'));
+console.log(`Palmetto Bay Heat: ${gameFileCount} game files, 16 story missions, smuggling runs and the Bay Auto Mall dealership — copying to ${out}.`);
+
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });
+
+// The dossier's cover is the first screenshot by name: prove the
+// screenshots folder accepts a file before the dossier is built, or the
+// entry ships with a cover the grader cannot see. The probe file is
+// removed again straight away — it is a check, not a screenshot.
+const screenshotProbe = join(out, 'screenshots', '.write-probe');
+try {
+  writeFileSync(screenshotProbe, 'ok');
+  rmSync(screenshotProbe);
+} catch {
+  throw new Error(`Palmetto Bay Heat: screenshots directory is not writable: ${join(out, 'screenshots')} — the dossier cover cannot be written.`);
+}
 if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 
 // The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the

@@ -2,6 +2,10 @@
 // the minimap. Drawn in screen space (1280 x 720) on top of the world view.
 import { FIELD, FONT, PACKAGES_TOTAL, PALETTE, SITES, WORLD } from './config.js';
 import { MISSION_DEFS, objectiveText, taxiObjective } from './missions.js';
+import { mission2ObjectivePos, objectiveText2 } from './missions2.js';
+import { mission3ObjectivePos, objectiveText3 } from './missions3.js';
+import { mission4ObjectivePos, objectiveText4 } from './missions4.js';
+import { smugglingObjective, smugglingObjectiveText } from './smuggling.js';
 import { BUSINESS_DEFS, ownedCount, totalTill } from './business.js';
 import { RACE_CIRCUITS, currentRaceCheckpoint, racePositionText } from './races.js';
 import { districtAt, nearSite } from './world.js';
@@ -97,6 +101,14 @@ export function drawMinimap(ctx, state, city) {
     ctx.fillStyle = state.business && state.business.owned[b.id] ? PALETTE.health : PALETTE.gold;
     ctx.fillText('$', MM.x + b.x * sx, MM.y + b.y * sy + 3);
   }
+  // Bay Auto Mall (gold D), Dockside Pier (orange S) and the auction
+  // house (white A), so Rico can find the new round-6 spots at a glance.
+  ctx.fillStyle = PALETTE.gold;
+  ctx.fillText('D', MM.x + SITES.dealership.x * sx, MM.y + SITES.dealership.y * sy + 3);
+  ctx.fillStyle = '#fb923c';
+  ctx.fillText('S', MM.x + SITES.dock.x * sx, MM.y + SITES.dock.y * sy + 3);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('A', MM.x + SITES.auction.x * sx, MM.y + SITES.auction.y * sy + 3);
   ctx.textAlign = 'left';
   // Garage (green G), hospital (white cross), bank (gold B) and roadblocks (orange).
   ctx.font = 'bold 9px sans-serif';
@@ -140,6 +152,12 @@ export function drawMinimap(ctx, state, city) {
 export function currentObjectivePos(state) {
   const m = state.missions;
   if (state.race.active) return currentRaceCheckpoint(state.race);
+  // The newest arc owns the arrow while it runs, then the older arcs.
+  if (state.missions4 && state.missions4.active) return mission4ObjectivePos(state.missions4, state);
+  if (state.missions3 && state.missions3.active) return mission3ObjectivePos(state.missions3, state);
+  if (state.missions2 && state.missions2.active) return mission2ObjectivePos(state.missions2);
+  // A live smuggling run owns the arrow once the story arcs are quiet.
+  if (state.smuggling && state.smuggling.active) return smugglingObjective(state.smuggling);
   if (!m.active || m.index >= MISSION_DEFS.length) {
     const taxi = taxiObjective(m);
     return taxi ? { x: taxi.x, y: taxi.y } : null;
@@ -148,6 +166,19 @@ export function currentObjectivePos(state) {
   if (!step) return null;
   if (step.kind === 'escape') return null;
   return { x: step.x, y: step.y };
+}
+
+// The objective line for the HUD: the running arc owns it, and when no
+// arc is running the next unstarted arc owns the M prompt.
+export function currentObjectiveLine(state) {
+  if (state.missions4 && state.missions4.active) return objectiveText4(state.missions4);
+  if (state.missions3 && state.missions3.active) return objectiveText3(state.missions3);
+  if (state.missions2 && state.missions2.active) return objectiveText2(state.missions2);
+  if (state.missions && state.missions.active) return objectiveText(state.missions);
+  if (state.missions4 && state.missions4.index < 3) return objectiveText4(state.missions4);
+  if (state.missions3 && state.missions3.index < 3) return objectiveText3(state.missions3);
+  if (state.missions2 && state.missions2.index < 3) return objectiveText2(state.missions2);
+  return objectiveText(state.missions);
 }
 
 export function drawHud(ctx, state, time) {
@@ -204,7 +235,7 @@ export function drawHud(ctx, state, time) {
   ctx.fillText(`${clock}  ${time.raining ? 'RAIN' : time.isNight ? 'NIGHT' : 'DAY'}`, FIELD.width / 2, 18);
   ctx.textAlign = 'left';
   // Objective bar, under the clock.
-  const obj = objectiveText(state.missions);
+  const obj = currentObjectiveLine(state);
   ctx.font = `bold 18px ${FONT}`;
   const w = ctx.measureText(obj).width + 28;
   ctx.fillStyle = 'rgba(10,14,20,0.72)';
@@ -230,6 +261,15 @@ export function drawHud(ctx, state, time) {
     ctx.fillText(`TAXI: ${taxi.text} — ${Math.ceil(state.missions.taxi.timer)}s`, FIELD.width / 2, 134);
     ctx.textAlign = 'left';
   }
+  // Smuggling run line, when a crate is live (below the taxi line when
+  // both are running, so the two never share a row).
+  if (state.smuggling && state.smuggling.active) {
+    ctx.font = `bold 17px ${FONT}`;
+    ctx.fillStyle = '#fb923c';
+    ctx.textAlign = 'center';
+    ctx.fillText(`SMUGGLING: ${smugglingObjectiveText(state.smuggling)}`, FIELD.width / 2, taxi ? 156 : 134);
+    ctx.textAlign = 'left';
+  }
   // Garage / hospital prompt when Rico is in range and can pay.
   const nearGarage = state.player.inCar && nearSite('garage', px0, py0);
   const nearHospital = !state.player.inCar && nearSite('hospital', px0, py0);
@@ -244,6 +284,22 @@ export function drawHud(ctx, state, time) {
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.fillText('G — Patch up at Bay General for $30', FIELD.width / 2, 156);
+    ctx.textAlign = 'left';
+  }
+  // Smuggling and dealership prompts when Rico is standing on the spot.
+  const nearDock = !state.player.inCar && nearSite('dock', px0, py0);
+  const nearMall = nearSite('dealership', px0, py0);
+  if (nearDock && !(state.smuggling && state.smuggling.active)) {
+    ctx.font = `bold 17px ${FONT}`;
+    ctx.fillStyle = '#fb923c';
+    ctx.textAlign = 'center';
+    ctx.fillText('Z — Start a smuggling run (pick up a crate, $300 and up)', FIELD.width / 2, 178);
+    ctx.textAlign = 'left';
+  } else if (nearMall) {
+    ctx.font = `bold 17px ${FONT}`;
+    ctx.fillStyle = PALETTE.gold;
+    ctx.textAlign = 'center';
+    ctx.fillText(state.player.inCar ? 'O — Trade this car in at Bay Auto Mall' : 'O — Buy the featured car at Bay Auto Mall', FIELD.width / 2, 178);
     ctx.textAlign = 'left';
   }
   // Event feed: the last few things that happened, bottom-right.
@@ -282,7 +338,7 @@ export function drawHud(ctx, state, time) {
   } else {
     ctx.font = `15px ${FONT}`;
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillText('E — car   Q — punch   M — mission   R — race   T — taxi   B — business   G — repair   C — horn   H — help   P — pause', 16, FIELD.height - 28);
+    ctx.fillText('E — car   Q — punch   M — mission   R — race   T — taxi   B — business   G — repair   U — tune   V/J/K — casino   Z — smuggling   O — dealer   C — horn   H — help   P — pause', 16, FIELD.height - 28);
   }
   // Race timer: circuit name, clock, checkpoint and live position.
   if (state.race.active) {

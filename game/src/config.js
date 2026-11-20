@@ -37,6 +37,13 @@ export const SITES = {
   hospital: { x: 2400, y: 1960, radius: 130, name: 'Bay General Hospital' },
   precinct: { x: 1200, y: 360, radius: 110, name: 'PBPD Precinct 2' },
   bank: { x: 2800, y: 1200, radius: 110, name: 'Downtown Bank' },
+  casino: { x: 2800, y: 400, radius: 130, name: 'Coral Casino' },
+  // Round 6 redo: the Dockside Pier starts smuggling runs (Z), Bay Auto
+  // Mall sells and buys cars (O), and the Coral Heights Auction House is
+  // where the limo job (mission 15) begins.
+  dock: { x: 300, y: 2050, radius: 130, name: 'Dockside Pier' },
+  dealership: { x: 1500, y: 1900, radius: 150, name: 'Bay Auto Mall' },
+  auction: { x: 2400, y: 800, radius: 120, name: 'Coral Heights Auction House' },
 };
 export const REPAIR_COST = 50;
 export const HEAL_COST = 30;
@@ -192,6 +199,7 @@ export const PALETTE = {
   roadblock: '#f97316',
   garage: '#4ade80',
   hospital: '#f8fafc',
+  casino: '#f472b6',
   taxi: '#22d3ee',
   skid: 'rgba(20,20,24,0.55)',
   text: '#ffffff',

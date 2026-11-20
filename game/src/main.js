@@ -12,13 +12,19 @@ import { createPedestrians, createTraffic, startleTraffic, stepDrivenCar, stepPe
 import { addWanted, clearWanted, createPolice, stepPolice } from './police.js';
 import { MISSION_DEFS, createMissionState, objectiveText, showMessage, startMission, startTaxi, stepMissions, stepTaxi, taxiObjective } from './missions.js';
 import { MISSION2_DEFS, canStartMission2, createMission2State, mission2ObjectivePos, startMission2, stepMissions2 } from './missions2.js';
+import { MISSION3_DEFS, canStartMission3, createMission3State, mission3ObjectivePos, startMission3, stepMissions3 } from './missions3.js';
+import { MISSION4_DEFS, canStartMission4, createMission4State, mission4ObjectivePos, startMission4, stepMissions4 } from './missions4.js';
+import { breakSmugglingStreak, createSmugglingState, smugglingObjective, startSmugglingRun, stepSmuggling } from './smuggling.js';
+import { buyDealershipCar, createDealershipState, deserializeDealership, featuredCar, serializeDealership, stepDealership, tradeInCar } from './dealership.js';
+import { buyNextUpgrade, createTuningState, deserializeTuning, serializeTuning, stepTuning } from './tuning.js';
+import { createCasinoState, deserializeCasino, playBlackjack, playRoulette, serializeCasino, spinSlots, stepCasino } from './casino.js';
 import { createWeatherState, stepWeather, weatherAsTime } from './weather.js';
 import { canShoot, collectWeaponPickups, createWeaponsState, shootFromPlayer, stepWeapons } from './weapons.js';
 import { createMinigameState, minigameObjective, stepMinigames } from './minigames.js';
 import { createRadioState, stepRadio } from './radio.js';
 import { RACE_CIRCUITS, canStartRace, createRaceState, currentRaceCheckpoint, nearestCircuit, startRace, stepRace } from './races.js';
 import { BUSINESS_DEFS, buyBusiness, canBuyBusiness, collectBusiness, createBusinessState, nearestBusiness, nearestBusinessWithTill, stepBusinesses, totalTill } from './business.js';
-import { ACTION_BUSINESS, ACTION_CONFIRM, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_TAXI, createInput } from './input.js';
+import { ACTION_BUSINESS, ACTION_CASINO_BLACKJACK, ACTION_CASINO_ROULETTE, ACTION_CASINO_SLOTS, ACTION_CONFIRM, ACTION_DEALERSHIP, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_SMUGGLING, ACTION_TAXI, ACTION_TUNE, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { stageShot } from './shots.js';
@@ -54,6 +60,23 @@ function createState() {
       nearest.topSpeed = hauler.top;
     }
   }
+  // Harbor Lights (mission 11) needs a Sunset Roadster to steal: make
+  // sure one is parked by the Beachfront Pier, whatever the random draw
+  // gave the street.
+  const roadster = VEHICLE_MODELS.find((m) => m.name === 'Sunset Roadster');
+  if (roadster) {
+    let nearest = null;
+    let nearestD = Infinity;
+    for (const car of parkedCars) {
+      const d = Math.hypot(car.x - 600, car.y - 2260);
+      if (d < nearestD) { nearestD = d; nearest = car; }
+    }
+    if (nearest) {
+      nearest.model = roadster.name;
+      nearest.color = roadster.color;
+      nearest.topSpeed = roadster.top;
+    }
+  }
   const state = {
     player,
     city,
@@ -63,6 +86,12 @@ function createState() {
     police: createPolice(),
     missions: createMissionState(),
     missions2: createMission2State(),
+    missions3: createMission3State(),
+    missions4: createMission4State(),
+    smuggling: createSmugglingState(),
+    dealership: createDealershipState(random),
+    tuning: createTuningState(),
+    casino: createCasinoState(),
     weather: createWeatherState(),
     weapons: createWeaponsState(),
     minigames: createMinigameState(),
@@ -119,6 +148,12 @@ function saveGame() {
       weapons: { equipped: state.weapons.equipped, shotsFired: state.weapons.shotsFired, shotsHit: state.weapons.shotsHit, kills: state.weapons.kills },
       minigames: { courier: state.minigames.courier.drops, vigilante: state.minigames.vigilante.caught, rangeBest: state.minigames.range.best },
       missions2Index: state.missions2.index,
+      missions3Index: state.missions3.index,
+      missions4Index: state.missions4.index,
+      smuggling: { streak: state.smuggling.streak, runs: state.smuggling.runs, earned: state.smuggling.earned, heat: state.smuggling.heat, dropIndex: state.smuggling.dropIndex },
+      dealership: serializeDealership(state.dealership),
+      tuning: serializeTuning(state.tuning),
+      casino: serializeCasino(state.casino),
       radioStation: state.radio.stationIndex,
       health: state.player.health,
       stats: state.stats,
@@ -159,6 +194,18 @@ function loadGame() {
     }
     if (typeof data.health === 'number') state.player.health = data.health;
     if (typeof data.missions2Index === 'number') state.missions2.index = Math.max(0, Math.min(MISSION2_DEFS.length, data.missions2Index));
+    if (typeof data.missions3Index === 'number') state.missions3.index = Math.max(0, Math.min(MISSION3_DEFS.length, data.missions3Index));
+    if (typeof data.missions4Index === 'number') state.missions4.index = Math.max(0, Math.min(MISSION4_DEFS.length, data.missions4Index));
+    if (data.smuggling && typeof data.smuggling === 'object') {
+      if (typeof data.smuggling.streak === 'number') state.smuggling.streak = Math.max(0, data.smuggling.streak);
+      if (typeof data.smuggling.runs === 'number') state.smuggling.runs = Math.max(0, data.smuggling.runs);
+      if (typeof data.smuggling.earned === 'number') state.smuggling.earned = Math.max(0, data.smuggling.earned);
+      if (typeof data.smuggling.heat === 'number') state.smuggling.heat = Math.max(0, data.smuggling.heat);
+      if (typeof data.smuggling.dropIndex === 'number') state.smuggling.dropIndex = Math.max(0, data.smuggling.dropIndex);
+    }
+    if (data.dealership && typeof data.dealership === 'object') deserializeDealership(state.dealership, data.dealership);
+    if (data.tuning && typeof data.tuning === 'object') deserializeTuning(state.tuning, data.tuning);
+    if (data.casino && typeof data.casino === 'object') deserializeCasino(state.casino, data.casino);
     if (typeof data.radioStation === 'number') state.radio.stationIndex = Math.max(0, Math.min(3, data.radioStation));
     if (data.weather && typeof data.weather === 'object') {
       if (typeof data.weather.hour === 'number') state.weather.hour = data.weather.hour;
@@ -186,6 +233,16 @@ function updateObjectivePos() {
     state.objectivePos = mission2ObjectivePos(state.missions2);
     return;
   }
+  // The third arc owns the arrow while it runs.
+  if (state.missions3.active) {
+    state.objectivePos = mission3ObjectivePos(state.missions3, state);
+    return;
+  }
+  // The fourth arc owns the arrow while it runs.
+  if (state.missions4.active) {
+    state.objectivePos = mission4ObjectivePos(state.missions4, state);
+    return;
+  }
   if (!m.active || m.index >= MISSION_DEFS.length) {
     const taxi = taxiObjective(m);
     if (taxi) {
@@ -196,6 +253,12 @@ function updateObjectivePos() {
     const side = minigameObjective(state.minigames);
     if (side) {
       state.objectivePos = { x: side.x, y: side.y };
+      return;
+    }
+    // A live smuggling run owns the arrow after the minigames.
+    const crate = smugglingObjective(state.smuggling);
+    if (crate) {
+      state.objectivePos = { x: crate.x, y: crate.y };
       return;
     }
     // Free roam with money waiting: point at the nearest owned business
@@ -284,6 +347,12 @@ function stepWorld(dt, input) {
   stepPolice(state.police, state, dt, random);
   stepMissions(state.missions, state, dt, events);
   stepMissions2(state.missions2, state, dt, events);
+  stepMissions3(state.missions3, state, dt, events);
+  stepMissions4(state.missions4, state, dt, events);
+  stepSmuggling(state.smuggling, state, dt);
+  stepDealership(state.dealership, state, dt, random);
+  stepTuning(state, dt, input);
+  stepCasino(state, dt);
   stepWeapons(state.weapons, state, dt);
   collectWeaponPickups(state);
   stepMinigames(state.minigames, state, dt, random);
@@ -319,6 +388,18 @@ function stepWorld(dt, input) {
     audio.fanfare();
     saveGame();
   }
+  if (state.missions3.done) {
+    state.missionsDone = Math.max(state.missionsDone, 10 + state.missions3.index);
+    state.missions3.done = false;
+    audio.fanfare();
+    saveGame();
+  }
+  if (state.missions4.done) {
+    state.missionsDone = Math.max(state.missionsDone, 13 + state.missions4.index);
+    state.missions4.done = false;
+    audio.fanfare();
+    saveGame();
+  }
   // Standing in the hospital zone patches Rico up for free, slowly.
   if (!player.inCar && nearSite('hospital', player.x, player.y) && player.health < 100) {
     player.health = Math.min(100, player.health + 6 * dt);
@@ -328,6 +409,8 @@ function stepWorld(dt, input) {
     player.money = Math.max(0, player.money - state.bailCost);
     clearWanted(state, state.police);
     state.missions.taxi.active = false;
+    // A bust ends the smuggling run and breaks the streak — the crate is gone.
+    breakSmugglingStreak(state, 'Busted — the crate is gone and the streak with it.');
     state.race.active = false;
     state.race.rivals = [];
     player.x = 600;
@@ -437,6 +520,85 @@ function runGame() {
         } else if (m2.failed) {
           startMission2(m2, m2.index);
           announce('Mission restarted.');
+        } else if (!m2.active && m2.index >= MISSION2_DEFS.length) {
+          // Second arc done: M opens the third arc (missions 11-13).
+          const m3 = state.missions3;
+          if (!m3.active && m3.index < MISSION3_DEFS.length) {
+            const whyNot = canStartMission3(state, m3.index);
+            if (whyNot) {
+              showMessage(m, whyNot, 4);
+            } else {
+              startMission3(m3, m3.index);
+              audio.click();
+              announce(`${MISSION3_DEFS[m3.index].title} started.`);
+            }
+          } else if (m3.failed) {
+            startMission3(m3, m3.index);
+            announce('Mission restarted.');
+          } else if (!m3.active && m3.index >= MISSION3_DEFS.length) {
+            // Third arc done: M opens the fourth arc (missions 14-16).
+            const m4 = state.missions4;
+            if (!m4.active && m4.index < MISSION4_DEFS.length) {
+              const whyNot = canStartMission4(state, m4.index);
+              if (whyNot) {
+                showMessage(m, whyNot, 4);
+              } else {
+                startMission4(m4, m4.index);
+                audio.click();
+                announce(`${MISSION4_DEFS[m4.index].title} started.`);
+              }
+            } else if (m4.failed) {
+              startMission4(m4, m4.index);
+              announce('Mission restarted.');
+            }
+          }
+        }
+      }
+    }
+    if (actions & ACTION_SMUGGLING) {
+      // Z at the Dockside Pier starts a crate run; Z mid-run reminds Rico
+      // where the crate has to go. The run itself pays on delivery.
+      if (state.smuggling.active) {
+        const drop = smugglingObjective(state.smuggling);
+        showMessage(state.missions, state.smuggling.phase === 'pickup'
+          ? 'Pick up the crate at the Dockside Pier.'
+          : `Run the crate to the drop — ${Math.ceil(state.smuggling.timer)}s left.`, 3);
+        if (drop) state.objectivePos = { x: drop.x, y: drop.y };
+      } else {
+        const drop = startSmugglingRun(state, random);
+        if (drop) {
+          audio.click();
+          pushFeed(state, `Crate job started — deliver to the ${drop.name}`);
+        }
+      }
+    }
+    if (actions & ACTION_DEALERSHIP) {
+      // O at Bay Auto Mall: on foot it buys the featured car off the lot,
+      // from the driver's seat it trades the car in against the featured
+      // one. Anywhere else it names the featured car and its price.
+      const featured = featuredCar(state.dealership);
+      if (!featured) {
+        showMessage(state.missions, 'Bay Auto Mall is on the Harbor road. Drive there and press O.', 4);
+      } else {
+        const featuredPrice = featured.price;
+        const px = state.player.inCar ? state.player.inCar.x : state.player.x;
+        const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+        if (Math.hypot(1500 - px, 1900 - py) > 150) {
+          showMessage(state.missions, `Bay Auto Mall is on the Harbor road — today's featured car is the ${featured.model} for $${featuredPrice}. Drive there and press O.`, 5);
+        } else if (state.player.inCar) {
+          const report = tradeInCar(state, featured.id, random);
+          if (report) {
+            audio.click();
+            pushFeed(state, `Traded in for the ${report.bought}  ${report.paid >= 0 ? `-$${report.paid}` : `+$${-report.paid}`}`);
+            saveGame();
+          }
+        } else {
+          const car = buyDealershipCar(state, featured.id, random);
+          if (car) {
+            audio.pickup();
+            pushFeed(state, `Bought the ${car.model}  -$${featuredPrice}`);
+            saveGame();
+          }
         }
       }
     }
@@ -500,6 +662,46 @@ function runGame() {
           showMessage(state.missions, `You own the ${biz.name} now — it earns $${biz.income} a minute. Press B here to collect.`, 5);
           saveGame();
         }
+      }
+    }
+    if (actions & ACTION_TUNE) {
+      // Tuning at Marina Garage: U buys the next upgrade in the build
+      // order for the car Rico is sitting in.
+      const bought = buyNextUpgrade(state);
+      if (bought) {
+        audio.click();
+        pushFeed(state, `${bought.name} fitted  -$${bought.price}`);
+        saveGame();
+      }
+    }
+    if (actions & ACTION_CASINO_SLOTS) {
+      const report = spinSlots(state, random);
+      if (report && report.payout > 0) {
+        audio.pickup();
+        pushFeed(state, `Slots win  +$${report.payout}`);
+        saveGame();
+      } else if (report) {
+        saveGame();
+      }
+    }
+    if (actions & ACTION_CASINO_BLACKJACK) {
+      const report = playBlackjack(state, random);
+      if (report && report.payout > 0) {
+        audio.pickup();
+        pushFeed(state, `Blackjack win  +$${report.payout}`);
+        saveGame();
+      } else if (report) {
+        saveGame();
+      }
+    }
+    if (actions & ACTION_CASINO_ROULETTE) {
+      const report = playRoulette(state, random, 'red');
+      if (report && report.payout > 0) {
+        audio.pickup();
+        pushFeed(state, `Roulette win  +$${report.payout}`);
+        saveGame();
+      } else if (report) {
+        saveGame();
       }
     }
     if (actions & ACTION_REPAIR) {

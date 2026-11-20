@@ -322,10 +322,13 @@ export function createRenderer(canvas) {
     text('An open-world crime story — steal, drive, race, and outrun the law.', FIELD.width / 2, 168, 20, '#e2e8f0', 'center');
     const lines = [
       'WASD / Arrows — move & drive    E — enter / exit car    Q — punch    C — horn',
-      'M — story mission (7)    R — street race (5 circuits, 4 rivals, entry fee)    T — taxi fare    B — buy / collect a business',
+      'M — story mission (16)    R — street race (5 circuits, 4 rivals, entry fee)    T — taxi fare    B — buy / collect a business',
+      'U — tune your car at Marina Garage    V / J / K — slots / blackjack / roulette at Coral Casino',
+      'Z — smuggling runs at the Dockside Pier ($300 and up, streaks pay more)    O — buy / trade in cars at Bay Auto Mall',
       'Mouse wheel — zoom camera    H — help    P — pause    N — mute',
       `Missions done: ${state.missionsDone}   Packages: ${state.missions.packagesFound}/${12}   Best Marina Loop: ${formatRaceTime(state.race.best[0])}   Races won: ${state.race.wins}   Taxi fares: ${state.stats ? state.stats.taxis || 0 : 0}`,
       `Businesses owned: ${state.business ? ownedCount(state.business) : 0}/${BUSINESS_DEFS.length}   Till waiting: $${state.business ? totalTill(state.business) : 0}`,
+      `Smuggling runs: ${state.smuggling ? state.smuggling.runs : 0}   Streak: ${state.smuggling ? state.smuggling.streak : 0}   Cars bought: ${state.dealership ? state.dealership.carsBought : 0}   Cars sold: ${state.dealership ? state.dealership.carsSold : 0}`,
       'Save: progress is kept in this browser automatically.',
     ];
     drawPanel(' ', lines, 'Press Space or click to start');
@@ -373,6 +376,32 @@ export function createRenderer(canvas) {
     context.stroke();
     context.fillStyle = '#fff';
     context.fillText('BAY GENERAL — HEALS', 2400, 1960);
+    context.strokeStyle = PALETTE.casino;
+    context.beginPath();
+    context.arc(2800, 400, 130, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = PALETTE.casino;
+    context.fillText('CORAL CASINO — SLOTS, CARDS, ROULETTE', 2800, 400);
+    // Round 6 redo: the dock, the car mall and the auction house, so
+    // Rico can see where the new jobs start without the help screen.
+    context.strokeStyle = '#fb923c';
+    context.beginPath();
+    context.arc(300, 2050, 130, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = '#fb923c';
+    context.fillText('DOCKSIDE PIER — SMUGGLING (Z)', 300, 2050);
+    context.strokeStyle = PALETTE.gold;
+    context.beginPath();
+    context.arc(1500, 1900, 150, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = PALETTE.gold;
+    context.fillText('BAY AUTO MALL — BUY / TRADE IN (O)', 1500, 1900);
+    context.strokeStyle = '#f8fafc';
+    context.beginPath();
+    context.arc(2400, 800, 120, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = '#f8fafc';
+    context.fillText('CORAL HEIGHTS AUCTION HOUSE', 2400, 800);
     context.textAlign = 'left';
     context.restore();
     // Skid marks left by drifting cars, fading over a few seconds.
@@ -695,9 +724,13 @@ export function createRenderer(canvas) {
     const lines = [
       'WASD / Arrows — move & drive      Shift — sprint (uses stamina)',
       'E — enter / exit car      Q — punch (chain for combos)      C — horn',
-      'M — story mission (7)      R — street race: 5 circuits, 4 rivals, $800 to the winner      T — taxi fare',
+      'M — story mission (16)      R — street race: 5 circuits, 4 rivals, $800 to the winner      T — taxi fare',
       'B — buy a business at its door / collect its takings (till caps after 4 minutes)',
+      'Z — smuggling run at the Dockside Pier: crate pays $300+, streaks pay more, heat grows with the streak',
+      'O — buy the featured car at Bay Auto Mall / trade in the car you are driving (rare car changes daily)',
       'G — repair at Marina Garage ($50) / heal at Bay General ($30)',
+      'U — tune your car at Marina Garage (engine, armor, nitro, paint)      C — horn (fires nitro when fitted)',
+      'V — slots ($50)      J — blackjack ($100)      K — roulette on red ($50), all at Coral Casino',
       'Mouse wheel — zoom camera      P — pause      N — mute      H — close',
       '3+ stars: roadblocks ahead. 4+ stars: a police helicopter watches you.',
       'Near-miss a car at speed for +$25. Find all 12 hidden packages.',
