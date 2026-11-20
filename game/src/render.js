@@ -3,6 +3,7 @@
 // paints a 1280 x 720 window of it, scaled to the browser window.
 import { CITY, FIELD, FONT, PALETTE, SITES, TITLE_FONT, WORLD } from './config.js';
 import { drawHud } from './hud.js';
+import { BUSINESS_DEFS, ownedCount, totalTill } from './business.js';
 import { RACE_CIRCUITS, currentRaceCheckpoint, formatRaceTime } from './races.js';
 import { onBeach, inWater, roadXs, roadYs } from './world.js';
 
@@ -321,9 +322,10 @@ export function createRenderer(canvas) {
     text('An open-world crime story — steal, drive, race, and outrun the law.', FIELD.width / 2, 168, 20, '#e2e8f0', 'center');
     const lines = [
       'WASD / Arrows — move & drive    E — enter / exit car    Q — punch    C — horn',
-      'M — story mission (5)    R — street race (3 circuits, rivals, entry fee)    T — taxi fare    G — repair / heal',
+      'M — story mission (7)    R — street race (5 circuits, 4 rivals, entry fee)    T — taxi fare    B — buy / collect a business',
       'Mouse wheel — zoom camera    H — help    P — pause    N — mute',
       `Missions done: ${state.missionsDone}   Packages: ${state.missions.packagesFound}/${12}   Best Marina Loop: ${formatRaceTime(state.race.best[0])}   Races won: ${state.race.wins}   Taxi fares: ${state.stats ? state.stats.taxis || 0 : 0}`,
+      `Businesses owned: ${state.business ? ownedCount(state.business) : 0}/${BUSINESS_DEFS.length}   Till waiting: $${state.business ? totalTill(state.business) : 0}`,
       'Save: progress is kept in this browser automatically.',
     ];
     drawPanel(' ', lines, 'Press Space or click to start');
@@ -398,6 +400,27 @@ export function createRenderer(canvas) {
       context.fillText('PBPD ROADBLOCK', rb.x, rb.y - 24);
       context.textAlign = 'left';
     }
+    // Business Empire storefronts: a gold $ for sale, green once owned,
+    // with the name underneath so Rico can find them without the help screen.
+    for (const b of BUSINESS_DEFS) {
+      const owned = state.business && state.business.owned[b.id];
+      context.fillStyle = owned ? 'rgba(74,222,128,0.25)' : 'rgba(242,201,76,0.25)';
+      context.beginPath();
+      context.arc(b.x, b.y, 34, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = owned ? PALETTE.health : PALETTE.gold;
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(b.x, b.y, 34, 0, Math.PI * 2);
+      context.stroke();
+      context.fillStyle = owned ? PALETTE.health : PALETTE.gold;
+      context.font = `bold 22px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('$', b.x, b.y + 8);
+      context.font = `bold 13px ${FONT}`;
+      context.fillText(b.name.toUpperCase(), b.x, b.y + 52);
+      context.textAlign = 'left';
+    }
     // Race start flags: checkered squares at each circuit's start line,
     // so Rico can find a race without opening the help screen.
     if (!state.race.active) {
@@ -420,7 +443,9 @@ export function createRenderer(canvas) {
       }
     }
     // Downtown Bank ring while the heist is running, with the vault-crack
-    // ring in gold when Rico is on the cracking step.
+    // ring in gold when Rico is on the cracking step. The same treatment
+    // marks the Container Heist yard (mission 6) and the kingpin's compound
+    // and safe (mission 7).
     if (state.missions.active && state.missions.index === 4) {
       context.save();
       context.strokeStyle = PALETTE.gold;
@@ -448,6 +473,64 @@ export function createRenderer(canvas) {
       }
       context.restore();
     }
+    // Container Heist yard ring, with the lock-crack fill in gold while
+    // Rico is on the sneaking step.
+    if (state.missions.active && state.missions.index === 5) {
+      context.save();
+      context.strokeStyle = PALETTE.gold;
+      context.setLineDash([10, 8]);
+      context.lineWidth = 3;
+      context.beginPath();
+      context.arc(500, 2050, 130, 0, Math.PI * 2);
+      context.stroke();
+      context.setLineDash([]);
+      context.fillStyle = PALETTE.gold;
+      context.font = `bold 16px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('CONTAINER YARD', 500, 2050);
+      context.textAlign = 'left';
+      if (state.missions.step === 1) {
+        context.fillStyle = `rgba(242,201,76,${0.25 + state.missions.sneak.progress * 0.45})`;
+        context.beginPath();
+        context.arc(500, 2050, 100, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = '#ffd23f';
+        context.font = `bold 15px ${FONT}`;
+        context.textAlign = 'center';
+        context.fillText('LOCK', 500, 2050);
+        context.textAlign = 'left';
+      }
+      context.restore();
+    }
+    // Kingpin's compound ring (red), with the safe-crack fill in gold while
+    // Rico is on the cracking step.
+    if (state.missions.active && state.missions.index === 6) {
+      context.save();
+      context.strokeStyle = '#ef4444';
+      context.setLineDash([10, 8]);
+      context.lineWidth = 3;
+      context.beginPath();
+      context.arc(2800, 400, 160, 0, Math.PI * 2);
+      context.stroke();
+      context.setLineDash([]);
+      context.fillStyle = '#ef4444';
+      context.font = `bold 16px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('KINGPIN COMPOUND', 2800, 400);
+      context.textAlign = 'left';
+      if (state.missions.step === 2) {
+        context.fillStyle = `rgba(242,201,76,${0.25 + state.missions.heist.crack * 0.45})`;
+        context.beginPath();
+        context.arc(2800, 260, 100, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = '#ffd23f';
+        context.font = `bold 15px ${FONT}`;
+        context.textAlign = 'center';
+        context.fillText('SAFE', 2800, 260);
+        context.textAlign = 'left';
+      }
+      context.restore();
+    }
     // Race checkpoints: the next one big and numbered, the rest faint rings.
     if (state.race.active) {
       const circuit = RACE_CIRCUITS[state.race.circuitIndex];
@@ -467,6 +550,15 @@ export function createRenderer(canvas) {
     for (const car of state.parkedCars) drawCarShape(car, false);
     for (const car of state.traffic) drawCarShape(car, false);
     for (const car of state.police.cars) drawCarShape(car, true);
+    // Harbor patrol guards (mission 6), with a GUARD tag above each one.
+    for (const guard of state.missions.guards || []) {
+      drawCarShape(guard, true);
+      context.fillStyle = '#fff';
+      context.font = `bold 12px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('GUARD', guard.x, guard.y - 24);
+      context.textAlign = 'left';
+    }
     // Rival race cars, with a name tag above each one.
     if (state.race.active) {
       for (const rival of state.race.rivals) {
@@ -603,7 +695,8 @@ export function createRenderer(canvas) {
     const lines = [
       'WASD / Arrows — move & drive      Shift — sprint (uses stamina)',
       'E — enter / exit car      Q — punch (chain for combos)      C — horn',
-      'M — story mission      R — street race: 3 circuits, 3 rivals, $800 to the winner      T — taxi fare',
+      'M — story mission (7)      R — street race: 5 circuits, 4 rivals, $800 to the winner      T — taxi fare',
+      'B — buy a business at its door / collect its takings (till caps after 4 minutes)',
       'G — repair at Marina Garage ($50) / heal at Bay General ($30)',
       'Mouse wheel — zoom camera      P — pause      N — mute      H — close',
       '3+ stars: roadblocks ahead. 4+ stars: a police helicopter watches you.',

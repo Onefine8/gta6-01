@@ -13,6 +13,7 @@ export const ACTION_HORN = 128;
 export const ACTION_HELP = 256;
 export const ACTION_REPAIR = 512;
 export const ACTION_TAXI = 1024;
+export const ACTION_BUSINESS = 2048;
 
 const UP = new Set(['ArrowUp', 'KeyW']);
 const DOWN = new Set(['ArrowDown', 'KeyS']);
@@ -29,6 +30,7 @@ const RUN = new Set(['ShiftLeft', 'ShiftRight']);
 const HELP = new Set(['KeyH']);
 const REPAIR = new Set(['KeyG']);
 const TAXI = new Set(['KeyT']);
+const BUSINESS = new Set(['KeyB']);
 const HORN = new Set(['KeyC']);
 
 export function createInput(target) {
@@ -48,6 +50,7 @@ export function createInput(target) {
     else if (HELP.has(code)) actions |= ACTION_HELP;
     else if (REPAIR.has(code)) actions |= ACTION_REPAIR;
     else if (TAXI.has(code)) actions |= ACTION_TAXI;
+    else if (BUSINESS.has(code)) actions |= ACTION_BUSINESS;
   }
 
   window.addEventListener('keydown', (event) => {
@@ -57,7 +60,7 @@ export function createInput(target) {
       || ENTER.has(event.code) || PUNCH.has(event.code) || MISSION.has(event.code)
       || PAUSE.has(event.code) || CONFIRM.has(event.code) || MUTE.has(event.code)
       || RACE.has(event.code) || RUN.has(event.code) || HELP.has(event.code)
-      || REPAIR.has(event.code) || TAXI.has(event.code) || HORN.has(event.code)) {
+      || REPAIR.has(event.code) || TAXI.has(event.code) || BUSINESS.has(event.code) || HORN.has(event.code)) {
       event.preventDefault();
     }
     press(event.code);
@@ -83,6 +86,7 @@ export function createInput(target) {
       if (name === 'race') actions |= ACTION_RACE;
       if (name === 'mission') actions |= ACTION_MISSION;
       if (name === 'repair') actions |= ACTION_REPAIR;
+      if (name === 'business') actions |= ACTION_BUSINESS;
       if (name === 'help') actions |= ACTION_HELP;
     };
     const off = (e) => { e.preventDefault(); touch[name] = false; };

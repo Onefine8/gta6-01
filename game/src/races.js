@@ -1,4 +1,4 @@
-// Street racing for Palmetto Bay Heat: three circuits around the city, three
+// Street racing for Palmetto Bay Heat: five circuits around the city, four
 // AI rivals who actually drive the course, an entry fee per circuit, an $800
 // prize for the winner, and a best time kept separately for each circuit.
 //
@@ -52,14 +52,46 @@ export const RACE_CIRCUITS = [
       { x: 400, y: 2000 },
     ],
   },
+  {
+    // Round 4: the long way round — a full lap of the city's outer roads,
+    // the longest circuit in the game and the richest entry fee so far.
+    id: 3,
+    name: 'Bay Perimeter Run',
+    entryFee: 400,
+    start: { x: 400, y: 400, angle: 0 },
+    checkpoints: [
+      { x: 2800, y: 400 },
+      { x: 2800, y: 2000 },
+      { x: 400, y: 2000 },
+      { x: 400, y: 400 },
+    ],
+  },
+  {
+    // Round 4: a twisty five-checkpoint slalom through Downtown and the park
+    // edge — tight corners reward braking, not just top speed.
+    id: 4,
+    name: 'Park Slalom',
+    entryFee: 500,
+    start: { x: 1600, y: 1200, angle: 0 },
+    checkpoints: [
+      { x: 2800, y: 1200 },
+      { x: 2800, y: 400 },
+      { x: 1200, y: 400 },
+      { x: 1200, y: 2000 },
+      { x: 1600, y: 2000 },
+    ],
+  },
 ];
 
 // The regulars at the start line. Faster rivals also drive cleaner lines;
 // the slowest one is cheap to beat, the fastest one is a real fight.
+// Round 4 adds Ghost — the fastest regular yet, and the only one who never
+// lifts for a corner he has already seen.
 export const RACE_RIVALS = [
   { name: 'Vex', color: '#c65df0', topSpeed: 460, skill: 0.92 },
   { name: 'Marisol', color: '#3f8fe8', topSpeed: 500, skill: 0.97 },
   { name: 'Turbo Tommy', color: '#e8533f', topSpeed: 535, skill: 1.0 },
+  { name: 'Ghost', color: '#22d3ee', topSpeed: 560, skill: 1.0 },
 ];
 
 export function createRaceState() {
@@ -69,7 +101,8 @@ export function createRaceState() {
     checkpoint: 0,
     timer: 0,
     // Best finish time per circuit, in seconds; null means never finished.
-    best: [null, null, null],
+    // One slot per circuit in RACE_CIRCUITS.
+    best: RACE_CIRCUITS.map(() => null),
     rivals: [],
     playerPlace: 0,
     wins: 0,

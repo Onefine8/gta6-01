@@ -118,13 +118,24 @@ export function punch(player, peds) {
   for (const ped of peds) {
     if (ped.fleeing) continue;
     if (Math.hypot(ped.x - px, ped.y - py) < 30) {
+      const damage = PLAYER.punchDamage + player.punchCombo * 10;
+      // The kingpin's bodyguards do not flee and can be punched down: they
+      // take the hit, get knocked back, and stay down at zero health.
+      if (ped.bodyguard) {
+        if (ped.health <= 0) continue;
+        ped.health = Math.max(0, (ped.health ?? 100) - damage);
+        const away = Math.atan2(ped.y - player.y, ped.x - player.x);
+        ped.x += Math.cos(away) * (14 + player.punchCombo * 8);
+        ped.y += Math.sin(away) * (14 + player.punchCombo * 8);
+        return ped;
+      }
       ped.fleeing = true;
       ped.fleeTimer = 4;
       // Knockback: the pedestrian stumbles away from Rico.
       const away = Math.atan2(ped.y - player.y, ped.x - player.x);
       ped.x += Math.cos(away) * (18 + player.punchCombo * 10);
       ped.y += Math.sin(away) * (18 + player.punchCombo * 10);
-      ped.health = Math.max(0, (ped.health ?? 100) - (PLAYER.punchDamage + player.punchCombo * 10));
+      ped.health = Math.max(0, (ped.health ?? 100) - damage);
       return ped;
     }
   }

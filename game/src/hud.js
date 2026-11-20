@@ -2,6 +2,7 @@
 // the minimap. Drawn in screen space (1280 x 720) on top of the world view.
 import { FIELD, FONT, PACKAGES_TOTAL, PALETTE, SITES, WORLD } from './config.js';
 import { MISSION_DEFS, objectiveText, taxiObjective } from './missions.js';
+import { BUSINESS_DEFS, ownedCount, totalTill } from './business.js';
 import { RACE_CIRCUITS, currentRaceCheckpoint, racePositionText } from './races.js';
 import { districtAt, nearSite } from './world.js';
 
@@ -89,6 +90,14 @@ export function drawMinimap(ctx, state, city) {
       ctx.fill();
     }
   }
+  // Businesses: gold $ for sale, green $ once Rico owns the place.
+  ctx.font = 'bold 9px sans-serif';
+  ctx.textAlign = 'center';
+  for (const b of BUSINESS_DEFS) {
+    ctx.fillStyle = state.business && state.business.owned[b.id] ? PALETTE.health : PALETTE.gold;
+    ctx.fillText('$', MM.x + b.x * sx, MM.y + b.y * sy + 3);
+  }
+  ctx.textAlign = 'left';
   // Garage (green G), hospital (white cross), bank (gold B) and roadblocks (orange).
   ctx.font = 'bold 9px sans-serif';
   ctx.textAlign = 'center';
@@ -164,6 +173,16 @@ export function drawHud(ctx, state, time) {
   ctx.fillStyle = '#fff';
   ctx.font = `13px ${FONT}`;
   ctx.fillText('HEALTH', 214, 79);
+  // Business empire line: how many properties Rico owns and what is waiting
+  // in their tills. Shown under the top-left panel once he owns something
+  // or a till is filling (the stamina bar owns the panel's bottom row).
+  if (state.business && (ownedCount(state.business) > 0 || totalTill(state.business) > 0)) {
+    ctx.fillStyle = 'rgba(10,14,20,0.72)';
+    ctx.fillRect(14, 112, 300, 22);
+    ctx.font = `bold 14px ${FONT}`;
+    ctx.fillStyle = PALETTE.gold;
+    ctx.fillText(`Businesses ${ownedCount(state.business)}/${BUSINESS_DEFS.length} — till $${totalTill(state.business)} (B to collect)`, 26, 117);
+  }
   // Stamina bar, on foot only: sprinting drains it, walking refills it.
   if (!state.player.inCar) {
     ctx.fillStyle = '#1f2937';
@@ -263,7 +282,7 @@ export function drawHud(ctx, state, time) {
   } else {
     ctx.font = `15px ${FONT}`;
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillText('E — car   Q — punch   M — mission   R — race   T — taxi   G — repair   C — horn   H — help   P — pause', 16, FIELD.height - 28);
+    ctx.fillText('E — car   Q — punch   M — mission   R — race   T — taxi   B — business   G — repair   C — horn   H — help   P — pause', 16, FIELD.height - 28);
   }
   // Race timer: circuit name, clock, checkpoint and live position.
   if (state.race.active) {
@@ -274,15 +293,17 @@ export function drawHud(ctx, state, time) {
     ctx.fillText(`${circuit.name}  ${state.race.timer.toFixed(1)}s — checkpoint ${state.race.checkpoint + 1}/${circuit.checkpoints.length} — ${racePositionText(state.race)}`, FIELD.width / 2, 112);
     ctx.textAlign = 'left';
   }
-  // Downtown Heist meters: vault-crack progress and the rising alarm.
+  // Heist meters: vault-crack progress and the rising alarm, for the
+  // Downtown Heist (mission 5) and the kingpin's safe (mission 7).
   // (Drawn below the countdown so the two never share a line.)
-  if (state.missions.active && state.missions.index === 4 && state.missions.step >= 1) {
+  if (state.missions.active && ((state.missions.index === 4 && state.missions.step >= 1) || (state.missions.index === 6 && state.missions.step >= 2))) {
     const heist = state.missions.heist;
     const barY = 158;
+    const crackLabel = state.missions.index === 6 ? 'SAFE' : 'VAULT';
     ctx.font = `bold 15px ${FONT}`;
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffd23f';
-    ctx.fillText(`VAULT ${Math.round(heist.crack * 100)}%`, FIELD.width / 2 - 130, barY + 4);
+    ctx.fillText(`${crackLabel} ${Math.round(heist.crack * 100)}%`, FIELD.width / 2 - 130, barY + 4);
     ctx.fillStyle = '#1f2937';
     ctx.fillRect(FIELD.width / 2 - 60, barY, 120, 12);
     ctx.fillStyle = '#f2c94c';
@@ -293,6 +314,27 @@ export function drawHud(ctx, state, time) {
     ctx.fillRect(FIELD.width / 2 + 190, barY, 120, 12);
     ctx.fillStyle = heist.alarm > 70 ? '#ff6b6b' : '#fb923c';
     ctx.fillRect(FIELD.width / 2 + 190, barY, 120 * Math.max(0, Math.min(1, heist.alarm / 100)), 12);
+    ctx.textAlign = 'left';
+  }
+  // Container Heist meters: how cracked the lock is, and how spotted Rico
+  // is by the patrol guards.
+  if (state.missions.active && state.missions.index === 5 && state.missions.step === 1) {
+    const sneak = state.missions.sneak;
+    const barY = 158;
+    ctx.font = `bold 15px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillText(`LOCK ${Math.round(sneak.progress * 100)}%`, FIELD.width / 2 - 130, barY + 4);
+    ctx.fillStyle = '#1f2937';
+    ctx.fillRect(FIELD.width / 2 - 60, barY, 120, 12);
+    ctx.fillStyle = '#f2c94c';
+    ctx.fillRect(FIELD.width / 2 - 60, barY, 120 * Math.max(0, Math.min(1, sneak.progress)), 12);
+    ctx.fillStyle = sneak.spot > 70 ? '#ff6b6b' : '#fb923c';
+    ctx.fillText(`SPOTTED ${Math.round(sneak.spot)}%`, FIELD.width / 2 + 130, barY + 4);
+    ctx.fillStyle = '#1f2937';
+    ctx.fillRect(FIELD.width / 2 + 190, barY, 120, 12);
+    ctx.fillStyle = sneak.spot > 70 ? '#ff6b6b' : '#fb923c';
+    ctx.fillRect(FIELD.width / 2 + 190, barY, 120 * Math.max(0, Math.min(1, sneak.spot / 100)), 12);
     ctx.textAlign = 'left';
   }
   // Mission countdown.

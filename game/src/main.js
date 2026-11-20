@@ -4,7 +4,7 @@
 //
 // ?shot=chase|walk|mission|night (with &seed=N) stages that scene instead of
 // running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { FIELD, HEAL_COST, REPAIR_COST, SAVE_KEY, STEP, TIME, WORLD } from './config.js';
+import { FIELD, HEAL_COST, REPAIR_COST, SAVE_KEY, STEP, TIME, VEHICLE_MODELS, WORLD } from './config.js';
 import { createRandom } from './random.js';
 import { createCity, createParkedCars, nearSite } from './world.js';
 import { createPlayer, enterCar, exitCar, nearestCar, punch, stepPlayer } from './player.js';
@@ -12,7 +12,8 @@ import { createPedestrians, createTraffic, startleTraffic, stepDrivenCar, stepPe
 import { addWanted, clearWanted, createPolice, stepPolice } from './police.js';
 import { MISSION_DEFS, createMissionState, objectiveText, showMessage, startMission, startTaxi, stepMissions, stepTaxi, taxiObjective } from './missions.js';
 import { RACE_CIRCUITS, canStartRace, createRaceState, currentRaceCheckpoint, nearestCircuit, startRace, stepRace } from './races.js';
-import { ACTION_CONFIRM, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_TAXI, createInput } from './input.js';
+import { BUSINESS_DEFS, buyBusiness, canBuyBusiness, collectBusiness, createBusinessState, nearestBusiness, nearestBusinessWithTill, stepBusinesses, totalTill } from './business.js';
+import { ACTION_BUSINESS, ACTION_CONFIRM, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_TAXI, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { stageShot } from './shots.js';
@@ -31,15 +32,33 @@ const city = createCity(random);
 
 function createState() {
   const player = createPlayer(600, 320);
+  const parkedCars = createParkedCars(random, city);
+  // The Container Heist needs a hauler to steal: make sure one is parked by
+  // the harbor yard, whatever the random draw gave the street.
+  const hauler = VEHICLE_MODELS.find((m) => m.name === 'Container Hauler');
+  if (hauler) {
+    let nearest = null;
+    let nearestD = Infinity;
+    for (const car of parkedCars) {
+      const d = Math.hypot(car.x - 500, car.y - 2050);
+      if (d < nearestD) { nearestD = d; nearest = car; }
+    }
+    if (nearest) {
+      nearest.model = hauler.name;
+      nearest.color = hauler.color;
+      nearest.topSpeed = hauler.top;
+    }
+  }
   const state = {
     player,
     city,
-    parkedCars: createParkedCars(random, city),
+    parkedCars,
     traffic: createTraffic(random, 14),
     peds: createPedestrians(random, 26),
     police: createPolice(),
     missions: createMissionState(),
     race: createRaceState(),
+    business: createBusinessState(),
     missionsDone: 0,
     time: { hour: TIME.startHour, isNight: false, raining: false },
     elapsed: 0,
@@ -85,6 +104,7 @@ function saveGame() {
       packages: taken,
       raceBest: state.race.best,
       raceWins: state.race.wins,
+      business: { owned: state.business.owned, till: state.business.till },
       health: state.player.health,
       stats: state.stats,
     }));
@@ -107,9 +127,21 @@ function loadGame() {
       state.city.packages.forEach((p, i) => { p.taken = data.packages[i] === 1; });
       state.missions.packagesFound = state.city.packages.filter((p) => p.taken).length;
     }
-    if (Array.isArray(data.raceBest)) state.race.best = data.raceBest.slice(0, 3);
-    else if (typeof data.raceBest === 'number') state.race.best = [data.raceBest, null, null];
+    if (Array.isArray(data.raceBest)) state.race.best = data.raceBest.slice(0, RACE_CIRCUITS.length);
+    else if (typeof data.raceBest === 'number') state.race.best = [data.raceBest, ...RACE_CIRCUITS.slice(1).map(() => null)];
     if (typeof data.raceWins === 'number') state.race.wins = data.raceWins;
+    if (data.business && typeof data.business === 'object') {
+      if (data.business.owned && typeof data.business.owned === 'object') {
+        for (const b of BUSINESS_DEFS) {
+          if (data.business.owned[b.id]) state.business.owned[b.id] = true;
+        }
+      }
+      if (data.business.till && typeof data.business.till === 'object') {
+        for (const b of BUSINESS_DEFS) {
+          if (typeof data.business.till[b.id] === 'number') state.business.till[b.id] = data.business.till[b.id];
+        }
+      }
+    }
     if (typeof data.health === 'number') state.player.health = data.health;
     if (data.stats && typeof data.stats === 'object') state.stats = { ...state.stats, ...data.stats };
   } catch {
@@ -125,7 +157,20 @@ function updateObjectivePos() {
   }
   if (!m.active || m.index >= MISSION_DEFS.length) {
     const taxi = taxiObjective(m);
-    state.objectivePos = taxi ? { x: taxi.x, y: taxi.y } : null;
+    if (taxi) {
+      state.objectivePos = { x: taxi.x, y: taxi.y };
+      return;
+    }
+    // Free roam with money waiting: point at the nearest owned business
+    // whose till is worth the drive.
+    if (totalTill(state.business) >= 200) {
+      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
+      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+      const biz = nearestBusinessWithTill(state.business, px, py);
+      state.objectivePos = biz ? { x: biz.x, y: biz.y } : null;
+      return;
+    }
+    state.objectivePos = null;
     return;
   }
   const step = MISSION_DEFS[m.index].steps[m.step];
@@ -205,6 +250,7 @@ function stepWorld(dt, input) {
   stepMissions(state.missions, state, dt, events);
   stepRace(state.race, state, dt, random);
   stepTaxi(state.missions, state, dt);
+  stepBusinesses(state.business, state, dt);
   updateObjectivePos();
 
   // Hidden packages: walk or drive over one to collect it ($100 each).
@@ -362,6 +408,38 @@ function runGame() {
         showMessage(state.missions, 'You already have a fare — finish it first.', 3);
       }
     }
+    if (actions & ACTION_BUSINESS) {
+      // Buy a business at its front door, or collect the takings from one
+      // Rico already owns. Each business keeps its own till, so Rico
+      // collects them one stop at a time.
+      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
+      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+      const biz = nearestBusiness(px, py);
+      if (!biz) {
+        const names = BUSINESS_DEFS.map((b) => b.name).join(', ');
+        showMessage(state.missions, `Businesses for sale: ${names}. Stand at one's front door and press B.`, 5);
+      } else if (state.business.owned[biz.id]) {
+        const amount = collectBusiness(state, biz.id);
+        if (amount > 0) {
+          audio.pickup();
+          pushFeed(state, `Collected ${biz.name} takings  +$${amount}`);
+          showMessage(state.missions, `Collected $${amount} from the ${biz.name}.`, 4);
+          saveGame();
+        } else {
+          showMessage(state.missions, `The ${biz.name} till is empty — it pays every minute.`, 3);
+        }
+      } else {
+        const whyNot = canBuyBusiness(state, biz.id);
+        if (whyNot) {
+          showMessage(state.missions, whyNot, 4);
+        } else if (buyBusiness(state, biz.id)) {
+          audio.fanfare();
+          pushFeed(state, `Bought the ${biz.name}  -$${biz.price}`);
+          showMessage(state.missions, `You own the ${biz.name} now — it earns $${biz.income} a minute. Press B here to collect.`, 5);
+          saveGame();
+        }
+      }
+    }
     if (actions & ACTION_REPAIR) {
       const player = state.player;
       if (player.inCar && nearSite('garage', player.inCar.x, player.inCar.y)) {
@@ -412,10 +490,14 @@ function runGame() {
     }
     if (actions & ACTION_PUNCH) {
       const hit = punch(state.player, state.peds);
-      if (hit) {
+      if (hit && !hit.bodyguard) {
         audio.punch();
         addWanted(state, 1);
         showMessage(state.missions, 'That pedestrian is calling the police!', 3);
+      } else if (hit) {
+        // Punching a bodyguard is part of the job, not a street crime — the
+        // kingpin's crew does not call the cops on itself.
+        audio.punch();
       }
     }
   }

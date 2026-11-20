@@ -11,20 +11,33 @@ a park, a beach and a harbour. Explore on foot or steal any parked car and
 drive it: traffic, pedestrians, police cruisers and a wanted level that
 follows you everywhere.
 
-- **Story missions (5):** "Wheels Up" (steal the Sunset Coupe for Marina),
+- **Story missions (7):** "Wheels Up" (steal the Sunset Coupe for Marina),
   "Bayfront Dash" (three timed drops across the city), "Heat Wave" (lose
   the police, then meet Dante at the park), "Harbor Heist" (steal the
-  Harbor Van, deliver it to Lighthouse Point, then vanish) and "Downtown
+  Harbor Van, deliver it to Lighthouse Point, then vanish), "Downtown
   Heist" (reach the Downtown bank, crack the vault by standing in the gold
   ring while the alarm climbs, grab the cash and lose the heat — $3,500,
-  plus a $500 bonus for a quiet job). Each has an intro, a fail condition
-  and a cash reward; a clean delivery in mission 1 pays a $100 bonus.
-- **Street racing:** three circuits — Marina Loop ($100 entry), Downtown
-  Dash ($200) and Beachfront Sprint ($300) — each with its own checkered
-  start flag and a best time. Press R at a flag to enter: three AI rivals
-  (Vex, Marisol, Turbo Tommy) line up behind you and drive the same
-  checkpoints. Win the race for $800; the entry fee is lost if you quit,
-  wreck or get busted.
+  plus a $500 bonus for a quiet job), "Container Heist" (sneak into the
+  harbor container yard, crack the lock while patrol guards circle, jack
+  the Container Hauler and deliver it — $4,500) and "Kingpin Takedown"
+  (the finale: storm the Coral Heights compound, beat down four
+  bodyguards, crack the kingpin's safe, take the ledger under a five-star
+  heat and vanish — $8,000, plus a $1,000 bonus for a quiet job). Each has
+  an intro, a fail condition and a cash reward; a clean delivery in
+  mission 1 pays a $100 bonus.
+- **Business Empire:** four buyable properties — Bayview Safehouse
+  ($1,500), Palm Auto Workshop ($3,000), Neon Bar ($5,000) and Harbor
+  Warehouse ($9,000). Each pays passive income into its own till every
+  minute (up to four minutes' worth); stand at the front door and press B
+  to buy, or to collect the takings. The HUD and minimap track what you
+  own and what is waiting.
+- **Street racing:** five circuits — Marina Loop ($100 entry), Downtown
+  Dash ($200), Beachfront Sprint ($300), Bay Perimeter Run ($400) and Park
+  Slalom ($500) — each with its own checkered start flag and a best time.
+  Press R at a flag to enter: four AI rivals (Vex, Marisol, Turbo Tommy
+  and the new Ghost) line up behind you and drive the same checkpoints.
+  Win the race for $800; the entry fee is lost if you quit, wreck or get
+  busted.
 - **Open world:** driveable stolen cars with handling, collisions and
   damage; traffic and pedestrians; 12 hidden packages to collect; a
   repeatable taxi job (pick up fares, get paid by distance); near-miss
@@ -43,9 +56,9 @@ follows you everywhere.
   effects — no audio files.
 - **Controls:** WASD/arrows to move and drive, E to enter/exit a car,
   Q to punch, C to honk, M for missions, R for the race, T for a taxi fare,
-  G to repair/heal, H for help, mouse wheel to zoom the camera, P to
-  pause, N to mute. Touch buttons appear on mobile. Progress saves to
-  localStorage.
+  B to buy/collect a business, G to repair/heal, H for help, mouse wheel to
+  zoom the camera, P to pause, N to mute. Touch buttons appear on mobile.
+  Progress saves to localStorage — including businesses owned and tills.
 
 ## Run it
 

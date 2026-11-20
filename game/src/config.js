@@ -44,6 +44,8 @@ export const HEAL_COST = 30;
 // Downtown Heist tuning: how long the vault takes to crack, how fast the
 // crack progress fades when Rico steps out of the ring, how fast the alarm
 // climbs once he is inside, and what counts as a quiet job for the bonus.
+// The Kingpin Takedown (mission 7) reuses the same vault rig with its own
+// crack time and a bigger quiet bonus.
 export const HEIST = {
   crackSeconds: 8,
   crackDecaySeconds: 4,
@@ -52,6 +54,47 @@ export const HEIST = {
   alarmSecondStar: 85,
   quietBonusAlarm: 60,
   quietBonus: 500,
+  kingpinCrackSeconds: 12,
+  kingpinQuietBonus: 1000,
+};
+
+// Container Heist tuning (mission 6): how long the container lock takes to
+// crack while Rico stays in the yard, how fast the crack slips when he steps
+// out, how close a patrolling guard has to be to spot him, and how fast the
+// spotted meter fills and cools.
+export const CONTAINER = {
+  sneakSeconds: 12,
+  sneakDecaySeconds: 6,
+  guardSpotRange: 280,
+  spotPerSecond: 25,
+  spotCooldownPerSecond: 12,
+  guardSpeed: 130,
+};
+
+// Kingpin Takedown tuning (mission 7): how many bodyguards hold the
+// compound, how much health each one has, and how hard they hit Rico up
+// close.
+export const KINGPIN = {
+  fightCount: 4,
+  bodyguardHealth: 100,
+  bodyguardSpeed: 60,
+  bodyguardRange: 280,
+  bodyguardDamage: 6,
+};
+
+// Business Empire tuning: each owned business pays its income into its till
+// once per tick; the till caps at a few ticks so Rico has to come and collect
+// (B) instead of letting it pile up forever.
+export const EMPIRE = {
+  tickSeconds: 60,
+  maxTicks: 4,
+  collectRange: 150,
+  businesses: [
+    { id: 'safehouse', name: 'Bayview Safehouse', price: 1500, income: 45, x: 700, y: 340 },
+    { id: 'workshop', name: 'Palm Auto Workshop', price: 3000, income: 100, x: 1300, y: 740 },
+    { id: 'bar', name: 'Neon Bar', price: 5000, income: 180, x: 2100, y: 340 },
+    { id: 'warehouse', name: 'Harbor Warehouse', price: 9000, income: 320, x: 460, y: 1940 },
+  ],
 };
 
 // Named districts, shown in the HUD as Rico crosses the city.
@@ -120,6 +163,10 @@ export const VEHICLE_MODELS = [
   { name: 'Neon GT', color: '#c65df0', top: 620 },
   { name: 'Sunset Roadster', color: '#ff8c42', top: 640 },
   { name: 'Harbor Tow', color: '#8a9a5b', top: 450 },
+  // Round 4: the hauler Rico jacks in the Container Heist, and the kingpin's
+  // own limousine — rare, black, and the second-fastest car on the streets.
+  { name: 'Container Hauler', color: '#d97706', top: 480 },
+  { name: 'Kingpin Limo', color: '#1f2937', top: 600 },
 ];
 
 export const PALETTE = {
