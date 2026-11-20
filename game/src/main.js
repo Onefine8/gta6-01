@@ -11,6 +11,11 @@ import { createPlayer, enterCar, exitCar, nearestCar, punch, stepPlayer } from '
 import { createPedestrians, createTraffic, startleTraffic, stepDrivenCar, stepPedestrian, stepTrafficCar } from './vehicles.js';
 import { addWanted, clearWanted, createPolice, stepPolice } from './police.js';
 import { MISSION_DEFS, createMissionState, objectiveText, showMessage, startMission, startTaxi, stepMissions, stepTaxi, taxiObjective } from './missions.js';
+import { MISSION2_DEFS, canStartMission2, createMission2State, mission2ObjectivePos, startMission2, stepMissions2 } from './missions2.js';
+import { createWeatherState, stepWeather, weatherAsTime } from './weather.js';
+import { canShoot, collectWeaponPickups, createWeaponsState, shootFromPlayer, stepWeapons } from './weapons.js';
+import { createMinigameState, minigameObjective, stepMinigames } from './minigames.js';
+import { createRadioState, stepRadio } from './radio.js';
 import { RACE_CIRCUITS, canStartRace, createRaceState, currentRaceCheckpoint, nearestCircuit, startRace, stepRace } from './races.js';
 import { BUSINESS_DEFS, buyBusiness, canBuyBusiness, collectBusiness, createBusinessState, nearestBusiness, nearestBusinessWithTill, stepBusinesses, totalTill } from './business.js';
 import { ACTION_BUSINESS, ACTION_CONFIRM, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_TAXI, createInput } from './input.js';
@@ -57,6 +62,11 @@ function createState() {
     peds: createPedestrians(random, 26),
     police: createPolice(),
     missions: createMissionState(),
+    missions2: createMission2State(),
+    weather: createWeatherState(),
+    weapons: createWeaponsState(),
+    minigames: createMinigameState(),
+    radio: createRadioState(),
     race: createRaceState(),
     business: createBusinessState(),
     missionsDone: 0,
@@ -105,6 +115,11 @@ function saveGame() {
       raceBest: state.race.best,
       raceWins: state.race.wins,
       business: { owned: state.business.owned, till: state.business.till },
+      weather: { type: state.weather.type, hour: state.weather.hour, day: state.weather.day },
+      weapons: { equipped: state.weapons.equipped, shotsFired: state.weapons.shotsFired, shotsHit: state.weapons.shotsHit, kills: state.weapons.kills },
+      minigames: { courier: state.minigames.courier.drops, vigilante: state.minigames.vigilante.caught, rangeBest: state.minigames.range.best },
+      missions2Index: state.missions2.index,
+      radioStation: state.radio.stationIndex,
       health: state.player.health,
       stats: state.stats,
     }));
@@ -143,6 +158,17 @@ function loadGame() {
       }
     }
     if (typeof data.health === 'number') state.player.health = data.health;
+    if (typeof data.missions2Index === 'number') state.missions2.index = Math.max(0, Math.min(MISSION2_DEFS.length, data.missions2Index));
+    if (typeof data.radioStation === 'number') state.radio.stationIndex = Math.max(0, Math.min(3, data.radioStation));
+    if (data.weather && typeof data.weather === 'object') {
+      if (typeof data.weather.hour === 'number') state.weather.hour = data.weather.hour;
+      if (typeof data.weather.day === 'number') state.weather.day = data.weather.day;
+    }
+    if (data.weapons && typeof data.weapons === 'object') {
+      if (typeof data.weapons.shotsFired === 'number') state.weapons.shotsFired = data.weapons.shotsFired;
+      if (typeof data.weapons.shotsHit === 'number') state.weapons.shotsHit = data.weapons.shotsHit;
+      if (typeof data.weapons.kills === 'number') state.weapons.kills = data.weapons.kills;
+    }
     if (data.stats && typeof data.stats === 'object') state.stats = { ...state.stats, ...data.stats };
   } catch {
     // A corrupt save is ignored; a fresh game starts instead.
@@ -155,10 +181,21 @@ function updateObjectivePos() {
     state.objectivePos = currentRaceCheckpoint(state.race);
     return;
   }
+  // The second arc owns the arrow while it runs.
+  if (state.missions2.active) {
+    state.objectivePos = mission2ObjectivePos(state.missions2);
+    return;
+  }
   if (!m.active || m.index >= MISSION_DEFS.length) {
     const taxi = taxiObjective(m);
     if (taxi) {
       state.objectivePos = { x: taxi.x, y: taxi.y };
+      return;
+    }
+    // A live side job (courier drop, vigilante hunt) owns the arrow next.
+    const side = minigameObjective(state.minigames);
+    if (side) {
+      state.objectivePos = { x: side.x, y: side.y };
       return;
     }
     // Free roam with money waiting: point at the nearest owned business
@@ -179,14 +216,12 @@ function updateObjectivePos() {
 }
 
 function updateTime(dt) {
-  state.time.hour = (state.time.hour + (dt * 24) / TIME.dayLengthSeconds) % 24;
-  state.time.isNight = state.time.hour >= TIME.nightStart || state.time.hour < TIME.nightEnd;
-  state.weatherTimer -= dt;
-  if (state.weatherTimer <= 0) {
-    state.weatherTimer = 45 + random() * 40;
-    state.time.raining = !state.time.raining && random() < 0.5;
-    if (state.time.raining) showMessage(state.missions, 'Rain over Palmetto Bay — roads are slick.', 3);
-  }
+  // The weather module owns the clock now: it advances the hour, flips
+  // night, and rolls the weather dice. state.time stays the old shape
+  // ({ hour, isNight, raining }) so driving and police keep reading it.
+  const events = stepWeather(state.weather, dt, random);
+  state.time = weatherAsTime(state.weather);
+  for (const event of events) showMessage(state.missions, event, 3);
 }
 
 function stepWorld(dt, input) {
@@ -248,6 +283,11 @@ function stepWorld(dt, input) {
   for (const ped of state.peds) stepPedestrian(ped, dt, random, city, player);
   stepPolice(state.police, state, dt, random);
   stepMissions(state.missions, state, dt, events);
+  stepMissions2(state.missions2, state, dt, events);
+  stepWeapons(state.weapons, state, dt);
+  collectWeaponPickups(state);
+  stepMinigames(state.minigames, state, dt, random);
+  stepRadio(state.radio, dt, random);
   stepRace(state.race, state, dt, random);
   stepTaxi(state.missions, state, dt);
   stepBusinesses(state.business, state, dt);
@@ -270,6 +310,12 @@ function stepWorld(dt, input) {
   if (state.missions.done) {
     state.missionsDone = Math.max(state.missionsDone, state.missions.index);
     state.missions.done = false;
+    audio.fanfare();
+    saveGame();
+  }
+  if (state.missions2.done) {
+    state.missionsDone = Math.max(state.missionsDone, 7 + state.missions2.index);
+    state.missions2.done = false;
     audio.fanfare();
     saveGame();
   }
@@ -376,6 +422,22 @@ function runGame() {
       } else if (m.failed) {
         startMission(m, m.index);
         announce('Mission restarted.');
+      } else if (!m.active && m.index >= MISSION_DEFS.length) {
+        // First story done: M opens the second arc (missions 8-10).
+        const m2 = state.missions2;
+        if (!m2.active && m2.index < MISSION2_DEFS.length) {
+          const whyNot = canStartMission2(state, m2.index);
+          if (whyNot) {
+            showMessage(m, whyNot, 4);
+          } else {
+            startMission2(m2, m2.index);
+            audio.click();
+            announce(`${MISSION2_DEFS[m2.index].title} started.`);
+          }
+        } else if (m2.failed) {
+          startMission2(m2, m2.index);
+          announce('Mission restarted.');
+        }
       }
     }
     if (actions & ACTION_RACE) {
@@ -489,6 +551,15 @@ function runGame() {
       }
     }
     if (actions & ACTION_PUNCH) {
+      // On foot with a gun equipped, Q fires the gun instead of punching —
+      // fists are what Q means when Rico is unarmed.
+      if (!state.player.inCar && state.weapons.equipped && canShoot(state.weapons)) {
+        const report = shootFromPlayer(state, random);
+        if (report.fired && report.hits > 0) addWanted(state, 1);
+        else if (report.fired) showMessage(state.missions, 'Shot fired — the street heard that.', 2);
+        else if (report.reason === 'magazine empty') showMessage(state.missions, 'Magazine empty — reloading.', 2);
+        return;
+      }
       const hit = punch(state.player, state.peds);
       if (hit && !hit.bodyguard) {
         audio.punch();
