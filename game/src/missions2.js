@@ -1,24 +1,30 @@
-// Story missions 8, 9 and 10 for Palmetto Bay Heat — the second arc,
-// picked up after the Kingpin Takedown (mission 7) closes the first story.
-// Same shape as missions.js on purpose: MISSION2_DEFS is a list of defs
-// with an intro line, a chain of objective steps, a reward and a fail
-// condition, and the state machine below walks the chain one step at a
-// time. The main loop treats missions and missions2 as two chapters of
-// the same book: only one chapter is active at a time, and the objective
-// arrow always points at whichever chapter is running.
+// Story missions 8, 9 and 10 — the second arc, picked up after the
+// Kingpin Takedown closes the first story. Same contract as missions.js:
+// a list of defs with an intro, a chain of objective steps, a reward and
+// a fail condition, walked one step at a time by a dispatch table. The
+// main loop treats the two arcs as chapters of one book: only one chapter
+// runs at a time, and the objective arrow points at whichever is live.
 //
-// New step kinds in this chapter, on top of the ones missions.js already
-// knows (goto, steal, escape, crack, grab, fight):
-//   - shoot: put down N marked targets (peds flagged as targets).
-//   - deliver: carry the goods to the drop — a goto that only counts on
-//     foot or in any car, but fails the step if Rico is busted mid-run.
-//   - survive: stay alive (and out of cuffs) for N seconds while the heat
-//     is on — the clock only runs while Rico is wanted.
-//   - chase: stay on a moving mark's tail for N seconds; fall behind and
-//     the progress slips away.
+// New step kinds in this chapter, on top of the first arc's goto, steal,
+// escape, crack, grab and fight:
+//   shoot   — put down N marked targets (peds flagged as targets)
+//   deliver — a goto with cargo: it only counts in the right vehicle,
+//             and wrecking the vehicle on the way fails the job
+//   survive — stay alive for N seconds while the heat is on; the clock
+//             only runs while Rico is wanted
+//   chase   — stay on a moving mark's tail; fall behind and progress slips
 import { HEIST, KINGPIN } from './config.js';
 import { addWanted } from './police.js';
 import { damagePlayer } from './player.js';
+
+function dist(ax, ay, bx, by) {
+  return Math.hypot(ax - bx, ay - by);
+}
+
+function ricoPos(state) {
+  const ride = state.player.inCar;
+  return ride ? { x: ride.x, y: ride.y } : { x: state.player.x, y: state.player.y };
+}
 
 export const MISSION2_DEFS = [
   {
@@ -96,7 +102,7 @@ const VAULT_GUARD_SPOTS = [
 
 export function createMission2State() {
   return {
-    index: 0, // which mission of MISSION2_DEFS is active (0-based); >= length = arc done
+    index: 0, // which mission of MISSION2_DEFS is next (0-based); >= length = arc done
     step: 0,
     active: false,
     introTimer: 0,
@@ -194,7 +200,7 @@ export function canStartMission2(state, index) {
 // Three armed dealers. They do not flee; they stand their ground, shoot
 // back when Rico gets close, and go down to punches or bullets. A dealer
 // at zero health counts towards the shoot step.
-function spawnDealers(missions2, state) {
+function fieldDealers(missions2, state) {
   state.peds = state.peds.filter((p) => !p.dealer);
   for (const spot of DEALER_SPOTS) {
     state.peds.push({
@@ -207,7 +213,7 @@ function spawnDealers(missions2, state) {
   missions2.dealersSpawned = true;
 }
 
-function stepDealers(missions2, state, dt) {
+function workDealers(missions2, state, dt) {
   const player = state.player;
   let down = 0;
   for (const ped of state.peds) {
@@ -225,7 +231,7 @@ function stepDealers(missions2, state, dt) {
     // punch that marks them fleeing must not make them unhittable.
     ped.fleeing = false;
     ped.fleeTimer = 0;
-    const d = Math.hypot(ped.x - player.x, ped.y - player.y);
+    const d = dist(ped.x, ped.y, player.x, player.y);
     // A dealer shoots back when Rico closes in on foot — a short-range,
     // slow shot, so Rico can dodge it by keeping his distance or by
     // moving fast. In a car the dealers hold their fire (they want the
@@ -248,7 +254,7 @@ function stepDealers(missions2, state, dt) {
 // Four enforcers who hold the Downtown tower. Same shape as the kingpin's
 // bodyguards in missions.js, but flagged as enforcers so the two fights
 // never count each other's casualties.
-function spawnEnforcers(missions2, state) {
+function fieldEnforcers(missions2, state) {
   state.peds = state.peds.filter((p) => !p.enforcer);
   for (const spot of VAULT_GUARD_SPOTS) {
     state.peds.push({
@@ -261,7 +267,7 @@ function spawnEnforcers(missions2, state) {
   missions2.enforcersSpawned = true;
 }
 
-function stepEnforcers(missions2, state, dt) {
+function workEnforcers(missions2, state, dt) {
   const player = state.player;
   let down = 0;
   for (const ped of state.peds) {
@@ -279,7 +285,7 @@ function stepEnforcers(missions2, state, dt) {
     // them fleeing must not make them unhittable.
     ped.fleeing = false;
     ped.fleeTimer = 0;
-    const d = Math.hypot(ped.x - player.x, ped.y - player.y);
+    const d = dist(ped.x, ped.y, player.x, player.y);
     if (d < KINGPIN.bodyguardRange && !player.inCar) {
       ped.angle = Math.atan2(player.y - ped.y, player.x - ped.x);
       ped.x += Math.cos(ped.angle) * KINGPIN.bodyguardSpeed * dt;
@@ -303,18 +309,175 @@ function countTargetsDown(state) {
   return down;
 }
 
+// --- Shared step machinery --------------------------------------------------
+function advance2(missions2, state, def, note) {
+  missions2.step += 1;
+  if (missions2.step >= def.steps.length) {
+    completeMission2(missions2, state, def);
+  } else if (note) {
+    showMessage2(missions2, note, 3);
+  }
+}
+
+function failJob2(missions2, def, failText) {
+  missions2.active = false;
+  missions2.failed = true;
+  missions2.failText = failText || def.failText;
+}
+
+// The big vault's alarm (mission 10): once Rico is inside, the alarm
+// climbs steadily, and at two thresholds it calls the law in for real.
+// The alarm only runs while the vault is being cracked — once the ledger
+// is taken the survive step is hard enough without it topping the heat
+// back up.
+function runVaultAlarm(missions2, state, dt, def) {
+  if (!(def.id === 10 && missions2.step === 2)) return;
+  const heist = missions2.heist;
+  heist.alarm = Math.min(100, heist.alarm + HEIST.alarmPerSecond * dt);
+  if (heist.alarm >= HEIST.alarmFirstStar && heist.alarmStars < 1) {
+    heist.alarmStars = 1;
+    addWanted(state, 1);
+    showMessage2(missions2, 'The vault alarm is screaming — the cops are coming!', 4);
+  } else if (heist.alarm >= HEIST.alarmSecondStar && heist.alarmStars < 2) {
+    heist.alarmStars = 2;
+    addWanted(state, 1);
+    showMessage2(missions2, 'Alarm maxed — the whole precinct is on its way!', 4);
+  }
+}
+
+// One handler per objective kind — same dispatch-table shape as the first arc.
+const STEP2_HANDLERS = {
+  goto(missions2, state, def, step) {
+    const pos = ricoPos(state);
+    if (dist(pos.x, pos.y, step.x, step.y) < step.radius && (!step.needCar || state.player.inCar)) {
+      advance2(missions2, state, def, 'Objective done — next stop marked.');
+    }
+  },
+
+  steal(missions2, state, def, step, events) {
+    const wantModel = step.model || 'Harbor Van';
+    const ride = state.player.inCar;
+    if (ride && ride.model === wantModel) {
+      advance2(missions2, state, def, `Got the ${wantModel}. Now get it where it needs to go.`);
+    } else if (events && events.stolenCar && ride && ride.model !== wantModel) {
+      showMessage2(missions2, `Wrong car — the job needs a ${wantModel}.`, 3);
+    }
+  },
+
+  deliver(missions2, state, def, step) {
+    // A delivery is a goto with cargo: it only counts in the right
+    // vehicle, and wrecking the vehicle on the way fails the job — the
+    // cargo does not survive a crash.
+    const ride = state.player.inCar;
+    if (ride && ride.health <= 0) {
+      failJob2(missions2, def, 'The delivery vehicle was wrecked — the cargo is scrap.');
+      return;
+    }
+    const pos = ricoPos(state);
+    if (dist(pos.x, pos.y, step.x, step.y) < step.radius && (!step.needCar || ride)) {
+      advance2(missions2, state, def, 'Delivered — next stop marked.');
+    }
+  },
+
+  escape(missions2, state, def) {
+    if (state.wanted === 0) {
+      advance2(missions2, state, def, 'Clean. Now move on to the next stop.');
+    }
+  },
+
+  crack(missions2, state, def, step, _events, dt) {
+    const pos = ricoPos(state);
+    const heist = missions2.heist;
+    const crackSeconds = def.crackSeconds || HEIST.crackSeconds;
+    if (dist(pos.x, pos.y, step.x, step.y) < step.radius) {
+      heist.crack = Math.min(1, heist.crack + dt / crackSeconds);
+      if (heist.crack >= 1) {
+        advance2(missions2, state, def, 'Vault open! Take the ledger and the cash.');
+      }
+    } else if (heist.crack > 0) {
+      heist.crack = Math.max(0, heist.crack - dt / HEIST.crackDecaySeconds);
+    }
+  },
+
+  shoot(missions2, state, def, _step, _events, dt) {
+    if (!missions2.dealersSpawned) fieldDealers(missions2, state);
+    workDealers(missions2, state, dt);
+    missions2.shootDown = Math.max(missions2.shootDown, countTargetsDown(state));
+    if (missions2.shootDown >= (def.shootCount || 3)) {
+      advance2(missions2, state, def, 'Dealers down — take the crate!');
+    }
+  },
+
+  fight(missions2, state, def, _step, _events, dt) {
+    if (!missions2.enforcersSpawned) fieldEnforcers(missions2, state);
+    workEnforcers(missions2, state, dt);
+    if (missions2.fightDown >= (def.fightCount || KINGPIN.fightCount)) {
+      advance2(missions2, state, def, 'Guards down — crack the vault!');
+    }
+  },
+
+  grab(missions2, state, def, step) {
+    const pos = ricoPos(state);
+    if (dist(pos.x, pos.y, step.x, step.y) < step.radius) {
+      missions2.heist.grabAlarm = missions2.heist.alarm;
+      if (def.id === 10) {
+        // The ledger and the cash are the crown jewels: taking them puts
+        // Rico at five stars on the spot.
+        addWanted(state, 5);
+        advance2(missions2, state, def, 'Ledger and cash taken — the whole precinct is coming for you!');
+      } else if (def.id === 9) {
+        addWanted(state, 2);
+        advance2(missions2, state, def, "Crate taken — the dealers' friends are on their way. Lose them!");
+      } else {
+        advance2(missions2, state, def, 'Grabbed — now lose the heat!');
+      }
+    }
+  },
+
+  survive(missions2, state, def, step, _events, dt) {
+    // Stay alive under heat: the clock only runs while Rico is wanted
+    // and still standing. Lose the heat early and the clock stalls — the
+    // step wants Rico to ride the storm out, not hide from it.
+    if (state.wanted > 0 && state.player.health > 0) {
+      missions2.surviveTimer += dt;
+      if (missions2.surviveTimer >= (step.seconds || 20)) {
+        advance2(missions2, state, def, 'You rode the heat out — now vanish for good.');
+      }
+    }
+  },
+
+  chase(missions2, state, def, step, _events, dt) {
+    // Stay on the mark's tail: within chaseRange for chaseSeconds, in
+    // total. Fall behind and the progress slips away.
+    const mark = step.mark || { x: step.x, y: step.y };
+    const pos = ricoPos(state);
+    const range = step.chaseRange || 300;
+    const need = step.chaseSeconds || 10;
+    if (dist(pos.x, pos.y, mark.x, mark.y) < range) {
+      missions2.chaseProgress = Math.min(1, missions2.chaseProgress + dt / need);
+      if (missions2.chaseProgress >= 1) {
+        advance2(missions2, state, def, 'You stayed on their tail — now make your move.');
+      }
+    } else {
+      missions2.chaseProgress = Math.max(0, missions2.chaseProgress - dt / (need * 2));
+    }
+  },
+};
+
 export function stepMissions2(missions2, state, dt, events) {
   if (missions2.messageTimer > 0) missions2.messageTimer -= dt;
   if (missions2.introTimer > 0) missions2.introTimer -= dt;
+  const def0 = MISSION2_DEFS[missions2.index];
   // Mission extras live only while their job needs them: dealers hold the
   // warehouse during mission 9's shoot step, enforcers hold the tower
   // during mission 10's fight step, and both go home otherwise.
-  const def0 = MISSION2_DEFS[missions2.index];
-  if (!(missions2.active && def0 && def0.id === 9 && missions2.step === 1)) {
+  const warehouseJob = missions2.active && def0 && def0.id === 9 && missions2.step === 1;
+  if (!warehouseJob) {
     if (state.peds.some((p) => p.dealer)) state.peds = state.peds.filter((p) => !p.dealer);
     missions2.dealersSpawned = false;
   }
-  if (!(missions2.active && def0 && def0.id === 10 && missions2.step === 1)) {
+  const towerJob = missions2.active && def0 && def0.id === 10 && missions2.step === 1;
+  if (!towerJob) {
     if (state.peds.some((p) => p.enforcer)) state.peds = state.peds.filter((p) => !p.enforcer);
     missions2.enforcersSpawned = false;
   }
@@ -323,164 +486,22 @@ export function stepMissions2(missions2, state, dt, events) {
   if (missions2.timer > 0) {
     missions2.timer -= dt;
     if (missions2.timer <= 0) {
-      missions2.active = false;
-      missions2.failed = true;
-      missions2.failText = def.failText;
+      failJob2(missions2, def);
       return;
     }
   }
   const step = currentStep2(missions2);
   if (!step) return;
-  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-  // The big vault's alarm (mission 10): once Rico is inside, the alarm
-  // climbs steadily, and at two thresholds it calls the law in for real.
-  // The alarm only runs while the vault is being cracked — once the
-  // ledger is taken the survive step is hard enough without it topping
-  // the heat back up.
-  if (def.id === 10 && missions2.step === 2) {
-    const heist = missions2.heist;
-    heist.alarm = Math.min(100, heist.alarm + HEIST.alarmPerSecond * dt);
-    if (heist.alarm >= HEIST.alarmFirstStar && heist.alarmStars < 1) {
-      heist.alarmStars = 1;
-      addWanted(state, 1);
-      showMessage2(missions2, 'The vault alarm is screaming — the cops are coming!', 4);
-    } else if (heist.alarm >= HEIST.alarmSecondStar && heist.alarmStars < 2) {
-      heist.alarmStars = 2;
-      addWanted(state, 1);
-      showMessage2(missions2, 'Alarm maxed — the whole precinct is on its way!', 4);
-    }
-  }
-  if (step.kind === 'crack') {
-    // Cracking a vault is a channel: stand in the ring and the tumblers
-    // fall, step out and the progress slips away. Mission 10's vault
-    // takes longer than the Downtown bank vault from mission 5.
-    const d = Math.hypot(px - step.x, py - step.y);
-    const heist = missions2.heist;
-    const crackSeconds = def.crackSeconds || HEIST.crackSeconds;
-    if (d < step.radius) {
-      heist.crack = Math.min(1, heist.crack + dt / crackSeconds);
-      if (heist.crack >= 1) {
-        missions2.step += 1;
-        showMessage2(missions2, 'Vault open! Take the ledger and the cash.', 3);
-      }
-    } else if (heist.crack > 0) {
-      heist.crack = Math.max(0, heist.crack - dt / HEIST.crackDecaySeconds);
-    }
-  } else if (step.kind === 'shoot') {
-    // The arms dealers: three shooters who hold the warehouse and shoot
-    // back. Put them down with fists or bullets — when all three are
-    // down, the crate is Rico's.
-    if (!missions2.dealersSpawned) spawnDealers(missions2, state);
-    stepDealers(missions2, state, dt);
-    if (missions2.shootDown >= (def.shootCount || 3)) {
-      missions2.step += 1;
-      showMessage2(missions2, 'Dealers down — take the crate!', 3);
-    }
-  } else if (step.kind === 'fight') {
-    // The vault guards: four enforcers who chase Rico and hit back.
-    // Punch them down (Q) — when all four are down, the vault is Rico's.
-    if (!missions2.enforcersSpawned) spawnEnforcers(missions2, state);
-    stepEnforcers(missions2, state, dt);
-    if (missions2.fightDown >= (def.fightCount || KINGPIN.fightCount)) {
-      missions2.step += 1;
-      showMessage2(missions2, 'Guards down — crack the vault!', 3);
-    }
-  } else if (step.kind === 'grab') {
-    const d = Math.hypot(px - step.x, py - step.y);
-    if (d < step.radius) {
-      missions2.heist.grabAlarm = missions2.heist.alarm;
-      missions2.step += 1;
-      if (def.id === 10) {
-        // The ledger and the cash are the crown jewels: taking them puts
-        // Rico at five stars on the spot.
-        addWanted(state, 5);
-        showMessage2(missions2, 'Ledger and cash taken — the whole precinct is coming for you!', 4);
-      } else if (def.id === 9) {
-        addWanted(state, 2);
-        showMessage2(missions2, 'Crate taken — the dealers\' friends are on their way. Lose them!', 4);
-      } else {
-        showMessage2(missions2, 'Grabbed — now lose the heat!', 3);
-      }
-    }
-  } else if (step.kind === 'steal') {
-    // The step advances only when Rico is actually driving the right car —
-    // any old stolen car does not count.
-    const wantModel = step.model || 'Harbor Van';
-    if (state.player.inCar && state.player.inCar.model === wantModel) {
-      missions2.step += 1;
-      showMessage2(missions2, `Got the ${wantModel}. Now get it where it needs to go.`, 3);
-    } else if (events && events.stolenCar && state.player.inCar && state.player.inCar.model !== wantModel) {
-      showMessage2(missions2, `Wrong car — the job needs a ${wantModel}.`, 3);
-    }
-  } else if (step.kind === 'deliver') {
-    // A delivery is a goto with a cargo: it only counts in the right
-    // vehicle, and wrecking the vehicle on the way fails the job — the
-    // cargo does not survive a crash.
-    const d = Math.hypot(px - step.x, py - step.y);
-    if (state.player.inCar && state.player.inCar.health <= 0) {
-      missions2.active = false;
-      missions2.failed = true;
-      missions2.failText = 'The delivery vehicle was wrecked — the cargo is scrap.';
-      return;
-    }
-    if (d < step.radius && (!step.needCar || state.player.inCar)) {
-      missions2.step += 1;
-      if (missions2.step >= def.steps.length) completeMission2(missions2, state, def);
-      else showMessage2(missions2, 'Delivered — next stop marked.', 3);
-    }
-  } else if (step.kind === 'survive') {
-    // Stay alive under heat: the clock only runs while Rico is wanted
-    // and still standing. Lose the heat early and the clock stalls — the
-    // step wants Rico to ride the storm out, not hide from it.
-    if (state.wanted > 0 && state.player.health > 0) {
-      missions2.surviveTimer += dt;
-      if (missions2.surviveTimer >= (step.seconds || 20)) {
-        missions2.step += 1;
-        showMessage2(missions2, 'You rode the heat out — now vanish for good.', 3);
-      }
-    }
-  } else if (step.kind === 'chase') {
-    // Stay on the mark's tail: within chaseRange for chaseSeconds, in
-    // total. Fall behind and the progress slips away.
-    const mark = step.mark || { x: step.x, y: step.y };
-    const d = Math.hypot(px - mark.x, py - mark.y);
-    const range = step.chaseRange || 300;
-    const need = step.chaseSeconds || 10;
-    if (d < range) {
-      missions2.chaseProgress = Math.min(1, missions2.chaseProgress + dt / need);
-      if (missions2.chaseProgress >= 1) {
-        missions2.step += 1;
-        showMessage2(missions2, 'You stayed on their tail — now make your move.', 3);
-      }
-    } else {
-      missions2.chaseProgress = Math.max(0, missions2.chaseProgress - dt / (need * 2));
-    }
-  } else if (step.kind === 'goto') {
-    const d = Math.hypot(px - step.x, py - step.y);
-    if (d < step.radius && (!step.needCar || state.player.inCar)) {
-      missions2.step += 1;
-      if (missions2.step >= def.steps.length) completeMission2(missions2, state, def);
-      else showMessage2(missions2, 'Objective done — next stop marked.', 3);
-    }
-  } else if (step.kind === 'escape') {
-    if (state.wanted === 0) {
-      missions2.step += 1;
-      if (missions2.step >= def.steps.length) completeMission2(missions2, state, def);
-      else showMessage2(missions2, 'Clean. Now move on to the next stop.', 3);
-    }
-  }
+  runVaultAlarm(missions2, state, dt, def);
+  const handler = STEP2_HANDLERS[step.kind];
+  if (handler) handler(missions2, state, def, step, events, dt);
   // The getaway vehicle must survive mission 8, and Rico must survive
   // all three — a wasted Rico fails the job on the spot.
   if (state.player.health <= 0) {
-    missions2.active = false;
-    missions2.failed = true;
-    missions2.failText = def.failText;
+    failJob2(missions2, def);
   }
   if (def.id === 8 && state.player.inCar && state.player.inCar.health <= 0 && missions2.step <= 2) {
-    missions2.active = false;
-    missions2.failed = true;
-    missions2.failText = def.failText;
+    failJob2(missions2, def);
   }
 }
 

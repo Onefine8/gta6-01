@@ -1,14 +1,14 @@
 // Weapons and on-foot combat for Palmetto Bay Heat. Rico starts with his
 // fists; everything else is bought, found or picked up off the street, and
-// every gun is a small state machine: a magazine, a reserve, a reload
+// every gun is a small machine of its own: a magazine, a reserve, a reload
 // timer, a cooldown between shots, and recoil that opens the spread up
 // while Rico keeps firing.
 //
 // The four guns cover four jobs:
-//   - Pistol: cheap, accurate, weak — the everyday carry.
-//   - Shotgun: short range, huge damage up close, slow — the door-kicker.
-//   - SMG: fast, wild, hungry for ammo — the spray-and-pray.
-//   - Rifle: long range, hard hitting, slow — the rooftop answer.
+//   Pistol — cheap, accurate, weak: the everyday carry.
+//   Shotgun — short range, huge damage up close, slow: the door-kicker.
+//   SMG — fast, wild, hungry for ammo: the spray-and-pray.
+//   Rifle — long range, hard hitting, slow: the rooftop answer.
 //
 // Combat is pure logic: a shot is a cone from Rico's position along his
 // facing, targets are the pedestrians and police cars in the state, and
@@ -113,9 +113,7 @@ export function totalAmmo(weapons, id) {
   return slot.mag + slot.reserve;
 }
 
-// Why Rico cannot buy this gun right now, or null when he can. The shop
-// is the Ammu-Nation counter on 5th Avenue — the check is the same shape
-// as the business buy check, so the main loop can reuse its toast.
+// Why Rico cannot buy this gun right now, or null when he can.
 export function canBuyWeapon(state, id) {
   const def = weaponById(id);
   if (!def) return 'There is no such weapon.';
@@ -138,82 +136,64 @@ export function buyWeapon(state, id) {
   return true;
 }
 
-// A short message on the mission toast line, if the state carries one.
-function tell(state, text, seconds) {
-  if (state && state.missions) {
-    state.missions.message = text;
-    state.missions.messageTimer = seconds || 3;
-  }
-}
-
+// Hand Rico a gun outright (pickup, mission reward): full magazine and at
+// least a magazine's worth of reserve, keeping any reserve he already had.
 export function giveWeapon(weapons, id, reserveRounds) {
   const def = weaponById(id);
   if (!def) return false;
   const slot = weapons.inventory[id];
   slot.owned = true;
   slot.mag = def.magSize;
-  slot.reserve = Math.max(slot.reserve, typeof reserveRounds === 'number' ? reserveRounds : def.magSize);
+  const grant = typeof reserveRounds === 'number' ? reserveRounds : def.magSize;
+  slot.reserve = Math.max(slot.reserve, grant);
   if (!weapons.equipped) weapons.equipped = id;
   return true;
 }
 
 export function equipWeapon(weapons, id) {
-  if (id === null) {
+  if (id === null || id === undefined) {
     weapons.equipped = null;
     weapons.aiming = false;
-    weapons.reloadTimer = 0;
     return true;
   }
   if (!hasWeapon(weapons, id)) return false;
   weapons.equipped = id;
-  weapons.reloadTimer = 0;
   return true;
 }
 
-// Cycle to the next owned gun (or back to fists after the last one).
+// Walk the owned guns in shop order, then holster to fists, then wrap
+// back to the first gun. Returns the newly equipped id (or null).
 export function cycleWeapon(weapons) {
-  const owned = WEAPON_DEFS.filter((d) => weapons.inventory[d.id].owned).map((d) => d.id);
+  const owned = WEAPON_DEFS.filter((d) => hasWeapon(weapons, d.id)).map((d) => d.id);
   if (owned.length === 0) {
     weapons.equipped = null;
     return null;
   }
-  const current = owned.indexOf(weapons.equipped);
-  const next = current < 0 || current >= owned.length - 1 ? owned[0] : owned[current + 1];
-  // One more press past the last gun holsters the weapon entirely.
-  if (current === owned.length - 1) {
-    weapons.equipped = null;
-    weapons.aiming = false;
-    return null;
-  }
+  const at = owned.indexOf(weapons.equipped);
+  const next = at < 0 ? owned[0] : (at + 1 < owned.length ? owned[at + 1] : null);
   weapons.equipped = next;
-  weapons.reloadTimer = 0;
+  if (!next) weapons.aiming = false;
   return next;
 }
 
 export function setAiming(weapons, aiming) {
-  if (!weapons.equipped) {
-    weapons.aiming = false;
-    return false;
-  }
-  weapons.aiming = !!aiming;
+  weapons.aiming = !!aiming && !!weapons.equipped;
   return weapons.aiming;
 }
 
-// Rico walks slower while aiming — the price of a steady hand. The main
-// loop multiplies the on-foot speed by this when aiming is on.
+// Aiming slows the walk to a careful stride — but only while a gun is out.
 export function aimSpeedFactor(weapons) {
   return weapons.aiming && weapons.equipped ? 0.55 : 1;
 }
 
-// The spread of the next shot: base spread, plus recoil bloom, minus the
-// steadying effect of aiming. A rifle aimed is a laser; an SMG sprayed
-// from the hip is a garden hose.
+// The cone half-angle right now: base spread, widened by recoil bloom,
+// tightened while aiming.
 export function currentSpread(weapons) {
   const def = equippedWeapon(weapons);
   if (!def) return 0;
-  let spread = def.spread + weapons.recoil * 0.25;
-  if (weapons.aiming) spread *= 0.55;
-  return spread;
+  const bloom = weapons.recoil * 0.12;
+  const base = def.spread + bloom;
+  return weapons.aiming ? base * 0.45 : base;
 }
 
 export function canShoot(weapons) {
@@ -228,11 +208,12 @@ export function canShoot(weapons) {
 export function needsReload(weapons) {
   if (!weapons.equipped) return false;
   const slot = weapons.inventory[weapons.equipped];
-  return slot.owned && slot.mag === 0 && slot.reserve > 0;
+  return !!slot && slot.owned && slot.mag === 0 && slot.reserve > 0;
 }
 
 // Start a reload: the magazine refills from the reserve when the timer
-// runs out. Returns false when there is nothing to reload with.
+// runs out. Nothing happens when the mag is already full, the reserve is
+// empty, or a reload is already running.
 export function startReload(weapons) {
   if (!weapons.equipped) return false;
   const def = equippedWeapon(weapons);
@@ -256,28 +237,25 @@ function finishReload(weapons) {
   weapons.reloadTimer = 0;
 }
 
-// Buy a box of reserve ammo for the equipped gun (or a named one).
+// One box of reserve ammo, any calibre — the shop does not care what gun.
 export function buyAmmo(state, id) {
-  const wid = id || state.weapons.equipped;
-  const def = weaponById(wid);
-  if (!def) return false;
-  if (!hasWeapon(state.weapons, wid)) return false;
+  const def = weaponById(id);
+  if (!def || !hasWeapon(state.weapons, id)) return false;
   if (state.player.money < AMMO_PRICE) return false;
   state.player.money -= AMMO_PRICE;
-  state.weapons.inventory[wid].reserve += AMMO_BOX_ROUNDS;
+  state.weapons.inventory[id].reserve += AMMO_BOX_ROUNDS;
   return true;
 }
 
 export function addAmmo(weapons, id, rounds) {
   const slot = weapons.inventory[id];
   if (!slot || !slot.owned) return false;
-  slot.reserve += Math.max(0, rounds);
+  slot.reserve += rounds;
   return true;
 }
 
-// Damage at a range: full damage up close, half at the far edge of the
-// cone, nothing past it. Shotgun pellets fall off much faster — the
-// range on the def is already short, and the falloff is steeper.
+// Damage at a distance: full at point blank, fading to nothing at the far
+// edge. A shotgun's pellets spread and die fast; a rifle holds its punch.
 export function damageAtRange(def, dist) {
   if (dist >= def.range) return 0;
   const t = dist / def.range;
@@ -285,37 +263,44 @@ export function damageAtRange(def, dist) {
   return Math.max(1, Math.round(def.damage * falloff));
 }
 
+// Wrap an angle difference into -PI..PI so a cone test never turns the
+// long way round.
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
 // A target list for a shot: pedestrians (with health) and police cars
 // (with health). Each entry needs x, y and a health field; the function
 // never mutates the list shape, only health and fleeing flags.
 function targetsInCone(state, ox, oy, angle, range, spread) {
   const found = [];
-  const peds = state.peds || [];
-  for (const ped of peds) {
-    if (ped.health !== undefined && ped.health <= 0) continue;
-    const d = Math.hypot(ped.x - ox, ped.y - oy);
-    if (d > range || d < 1) continue;
-    const want = Math.atan2(ped.y - oy, ped.x - ox);
-    let diff = want - angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    if (Math.abs(diff) <= spread + 0.12) found.push({ target: ped, dist: d, kind: 'ped' });
-  }
+  const consider = (target, kind, slack) => {
+    if (target.health !== undefined && target.health <= 0) return;
+    const d = Math.hypot(target.x - ox, target.y - oy);
+    if (d > range || d < 1) return;
+    const want = Math.atan2(target.y - oy, target.x - ox);
+    if (Math.abs(angleDiff(want, angle)) <= spread + slack) {
+      found.push({ target, dist: d, kind });
+    }
+  };
+  for (const ped of state.peds || []) consider(ped, 'ped', 0.12);
   const cars = [];
   if (state.police) cars.push(...(state.police.cars || []));
   if (state.traffic) cars.push(...state.traffic);
-  for (const car of cars) {
-    if (car.health !== undefined && car.health <= 0) continue;
-    const d = Math.hypot(car.x - ox, car.y - oy);
-    if (d > range || d < 1) continue;
-    const want = Math.atan2(car.y - oy, car.x - ox);
-    let diff = want - angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    if (Math.abs(diff) <= spread + 0.18) found.push({ target: car, dist: d, kind: 'car' });
-  }
+  for (const car of cars) consider(car, 'car', 0.18);
   found.sort((a, b) => a.dist - b.dist);
   return found;
+}
+
+// A short message on the mission toast line, if the state carries one.
+function tell(state, text, seconds) {
+  if (state.missions) {
+    state.missions.message = text;
+    state.missions.messageTimer = seconds || 3;
+  }
 }
 
 // Fire the equipped gun once, from (ox, oy) along angle. Returns a shot

@@ -1,24 +1,21 @@
 // Weather and the day/night cycle for Palmetto Bay Heat. The sky is a
-// state machine, not a coin flip per frame: an hour advances over the day
-// length in config, night falls on a fixed schedule, and the weather holds
-// one condition for a minute or two before blending into the next one, so a
-// storm that arrives actually lasts long enough to matter.
+// slow machine, not a coin flip per frame: the clock runs a full day over
+// the configured day length, night falls on a fixed schedule, and each
+// condition holds for a minute or two before the sky blends into the next
+// one — a storm that arrives actually lasts long enough to matter.
 //
-// Every condition is a set of numbers the rest of the game reads, never a
-// special case buried in the driving or police code:
-//   - visibility: how far Rico (and the police) can see, in world units.
-//   - grip: a multiplier on steering bite — rain and storms make the roads
-//     slick, fog barely touches the tyres.
-//   - policeSight: how close a cruiser has to be before it counts Rico as
-//     seen, so fog and rain genuinely help a getaway.
-//   - policeAggression: how fast cruisers close in once they are chasing.
-//   - rain / fog: 0..1 intensities for the renderer and the audio.
-//   - lightning: storms throw flashes that light the whole city for a
-//     heartbeat, then fade.
+// Every condition is a bundle of numbers the rest of the game reads,
+// never a special case buried in the driving or police code:
+//   visibility — how far Rico (and the police) can see, in world units
+//   grip — a multiplier on steering bite; rain and storms make roads slick
+//   policeSight — how close a cruiser must be before it counts Rico seen
+//   policeAggression — how fast cruisers close in once they are chasing
+//   rain / fog — 0..1 intensities for the renderer and the audio
+//   lightning — storms throw flashes that light the city for a heartbeat
 //
-// The module is pure logic: it takes a seeded random and a dt, and never
-// touches the canvas, the DOM or the network, so the headless tests can run
-// a whole week of weather in a few milliseconds.
+// The module is pure logic: a seeded random and a dt in, event strings
+// out. It never touches the canvas, the DOM or the network, so the
+// headless tests can run a whole week of weather in a few milliseconds.
 import { TIME, WORLD } from './config.js';
 
 // How long one weather condition holds before the sky rolls the dice again.
@@ -29,6 +26,31 @@ export const WEATHER_BLEND_SECONDS = 8;
 // A storm throws lightning this often, on average.
 export const LIGHTNING_MIN_GAP = 6;
 export const LIGHTNING_MAX_GAP = 18;
+
+// Night and twilight trim how far anyone can see, on top of the weather.
+const NIGHT_VISIBILITY = 0.62;
+const TWILIGHT_VISIBILITY = 0.85;
+const NIGHT_SIGHT = 0.8;
+const MIN_VISIBILITY = 120;
+const MIN_SIGHT = 140;
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function mixDef(from, to, t) {
+  // Blend two condition definitions field by field. Only the numeric
+  // fields slide; labels come from the destination.
+  const out = { id: t >= 1 ? to.id : `${from.id}->${to.id}`, label: to.label };
+  for (const key of ['visibility', 'grip', 'policeSight', 'policeAggression', 'rain', 'fog', 'wind', 'light', 'cloud']) {
+    out[key] = lerp(from[key], to[key], t);
+  }
+  return out;
+}
 
 // One entry per condition. Visibility is in world units (the city is
 // 3200 x 2400, the camera shows 1280 x 720), grip is a steering
@@ -73,14 +95,6 @@ export const WEATHER_TRANSITIONS = {
   storm: [['clear', 0.15], ['rain', 0.55], ['fog', 0.1], ['storm', 0.2]],
 };
 
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-function clamp01(v) {
-  return Math.max(0, Math.min(1, v));
-}
-
 export function createWeatherState(startHour) {
   const hour = typeof startHour === 'number' ? startHour : TIME.startHour;
   return {
@@ -116,14 +130,15 @@ export function hourLabel(hour) {
   return `${hh}:${mm}`;
 }
 
+// Named parts of the day, for the HUD and the sky colour. Dawn and dusk
+// are the short shoulders around the night edges.
 export function timeOfDay(hour) {
   if (hour >= 5 && hour < 7) return 'dawn';
   if (hour >= 7 && hour < 11) return 'morning';
   if (hour >= 11 && hour < 15) return 'midday';
   if (hour >= 15 && hour < 17.5) return 'afternoon';
   if (hour >= 17.5 && hour < TIME.nightStart) return 'dusk';
-  if (hour >= TIME.nightStart || hour < 5) return 'night';
-  return 'morning';
+  return 'night';
 }
 
 // Pick the next condition from the weighted table for the current sky.
@@ -138,12 +153,13 @@ export function pickNextWeather(random, current) {
   return 'clear';
 }
 
-function startTransition(weather, next, random) {
+function beginBlend(weather, next, random) {
+  const rng = random || Math.random;
   weather.from = weather.type;
   weather.to = next;
   weather.blend = 0;
-  weather.forecast = pickNextWeather(random || Math.random, next);
-  weather.holdTimer = WEATHER_HOLD_MIN + (random || Math.random)() * (WEATHER_HOLD_MAX - WEATHER_HOLD_MIN);
+  weather.forecast = pickNextWeather(rng, next);
+  weather.holdTimer = WEATHER_HOLD_MIN + rng() * (WEATHER_HOLD_MAX - WEATHER_HOLD_MIN);
 }
 
 // The blended definition in force right now: while a change is blending,
@@ -151,20 +167,7 @@ function startTransition(weather, next, random) {
 export function effectiveWeather(weather) {
   const from = WEATHER_DEFS[weather.from] || WEATHER_DEFS.clear;
   const to = WEATHER_DEFS[weather.to] || WEATHER_DEFS.clear;
-  const t = clamp01(weather.blend);
-  return {
-    id: t >= 1 ? weather.to : `${weather.from}->${weather.to}`,
-    label: to.label,
-    visibility: lerp(from.visibility, to.visibility, t),
-    grip: lerp(from.grip, to.grip, t),
-    policeSight: lerp(from.policeSight, to.policeSight, t),
-    policeAggression: lerp(from.policeAggression, to.policeAggression, t),
-    rain: lerp(from.rain, to.rain, t),
-    fog: lerp(from.fog, to.fog, t),
-    wind: lerp(from.wind, to.wind, t),
-    light: lerp(from.light, to.light, t),
-    cloud: lerp(from.cloud, to.cloud, t),
-  };
+  return mixDef(from, to, clamp01(weather.blend));
 }
 
 // How far Rico can see right now, in world units. Night shortens it
@@ -172,9 +175,12 @@ export function effectiveWeather(weather) {
 export function visibilityRange(weather) {
   const eff = effectiveWeather(weather);
   let range = eff.visibility;
-  if (weather.isNight) range *= 0.62;
-  else if (timeOfDay(weather.hour) === 'dusk' || timeOfDay(weather.hour) === 'dawn') range *= 0.85;
-  return Math.max(120, range);
+  if (weather.isNight) range *= NIGHT_VISIBILITY;
+  else {
+    const tod = timeOfDay(weather.hour);
+    if (tod === 'dusk' || tod === 'dawn') range *= TWILIGHT_VISIBILITY;
+  }
+  return Math.max(MIN_VISIBILITY, range);
 }
 
 // Steering grip right now: 1 is dry tarmac, lower is slicker. Night does
@@ -188,8 +194,8 @@ export function gripFactor(weather) {
 export function policeSightRange(weather) {
   const eff = effectiveWeather(weather);
   let range = eff.policeSight;
-  if (weather.isNight) range *= 0.8;
-  return Math.max(140, range);
+  if (weather.isNight) range *= NIGHT_SIGHT;
+  return Math.max(MIN_SIGHT, range);
 }
 
 // How hard the police chase once they are on Rico: a storm makes them
@@ -227,11 +233,14 @@ export function isFoggy(weather) {
 // on top, so a storm night flickers.
 export function ambientLight(weather) {
   const eff = effectiveWeather(weather);
-  let base = weather.isNight ? 0.28 : 0.95;
-  if (!weather.isNight) {
+  let base;
+  if (weather.isNight) {
+    base = 0.28;
+  } else {
     const tod = timeOfDay(weather.hour);
     if (tod === 'dawn' || tod === 'dusk') base = 0.6;
     else if (tod === 'morning' || tod === 'afternoon') base = 0.85;
+    else base = 0.95;
   }
   const light = base * (0.45 + 0.55 * eff.light);
   return Math.max(0.12, Math.min(1, light + weather.flash * 0.55));
@@ -257,8 +266,7 @@ export function skyColor(weather) {
 // driving code applies grip to steering, this caps the straight-line
 // speed a touch so a storm still feels different on a long straight.
 export function topSpeedFactor(weather) {
-  const grip = gripFactor(weather);
-  return 0.9 + grip * 0.1;
+  return 0.9 + gripFactor(weather) * 0.1;
 }
 
 // Braking distance grows as grip falls: stopping from speed takes
@@ -294,7 +302,7 @@ export function weatherSummaryLines(weather) {
 export function forceWeather(weather, type, random) {
   if (!WEATHER_DEFS[type]) return false;
   if (weather.type === type && weather.blend >= 1) return true;
-  startTransition(weather, type, random);
+  beginBlend(weather, type, random);
   weather.blend = 0;
   return true;
 }
@@ -332,9 +340,9 @@ export function stepWeather(weather, dt, random) {
   const rng = random || Math.random;
   const events = [];
   weather.elapsed += dt;
-  // The clock: a full day takes TIME.dayLengthSeconds, like main.js.
-  // Count whole days from the total hours advanced, so a step of exactly
-  // one day (or several) still rolls the day counter over.
+  // The clock: a full day takes TIME.dayLengthSeconds. Count whole days
+  // from the total hours advanced, so a step of exactly one day (or
+  // several) still rolls the day counter over.
   const hoursAdvanced = (dt * 24) / TIME.dayLengthSeconds;
   const totalHours = weather.hour + hoursAdvanced;
   const daysPassed = Math.floor(totalHours / 24);
@@ -364,7 +372,7 @@ export function stepWeather(weather, dt, random) {
     weather.holdTimer -= dt;
     if (weather.holdTimer <= 0) {
       const next = pickNextWeather(rng, weather.type);
-      if (next !== weather.type) startTransition(weather, next, rng);
+      if (next !== weather.type) beginBlend(weather, next, rng);
       else weather.holdTimer = WEATHER_HOLD_MIN + rng() * (WEATHER_HOLD_MAX - WEATHER_HOLD_MIN);
     }
   }
@@ -398,45 +406,38 @@ export function rainChanceNext(weather) {
   for (const [type, weight] of table) {
     if (type === 'rain' || type === 'storm') chance += weight;
   }
-  return chance;
+  return Math.max(0, Math.min(1, chance));
 }
 
-// A short forecast string: what is coming, and how sure the sky is.
 export function forecastText(weather) {
-  const next = WEATHER_DEFS[weather.forecast];
-  const chance = Math.round(rainChanceNext(weather) * 100);
-  if (weather.blend < 1) return `Changing to ${WEATHER_DEFS[weather.to].label} now.`;
-  return `Forecast: ${next.label} next (${chance}% chance of rain).`;
+  const next = WEATHER_DEFS[weather.forecast] || WEATHER_DEFS.clear;
+  const wait = Math.round(secondsToNextChange(weather));
+  return `Forecast: ${next.label} next in about ${wait}s — rain chance ${Math.round(rainChanceNext(weather) * 100)}%`;
 }
 
-// Visibility at a given point in the world: the beach road and the open
-// water are a touch clearer than the downtown canyons in fog, because
-// there is nothing for the fog to hang on to.
+// Visibility at a point in the city: the sea fog hangs heaviest along the
+// beachfront, so the same sky sees a little less far down by the water.
 export function visibilityAt(weather, x, y) {
-  const base = visibilityRange(weather);
-  const open = y > 2100 || x < 200 || x > WORLD.width - 200;
-  return open ? base * 1.15 : base;
+  let range = visibilityRange(weather);
+  if (typeof y === 'number' && y >= WORLD.height - 200) range *= 0.9;
+  if (typeof x === 'number' && x < 0) range = Math.max(MIN_VISIBILITY, range);
+  return Math.max(MIN_VISIBILITY, range);
 }
 
-// Does a police cruiser at (cx, cy) spot Rico at (px, py) right now?
-// Distance, weather sight range, and night all count; a helicopter
-// overhead (passed in as seenFromAbove) never loses him in any weather.
+// Can a cruiser at (cx, cy) see Rico at (px, py) right now? A helicopter
+// overhead sees through anything; on the ground, fog and night shrink
+// the spotting range.
 export function policeCanSee(weather, px, py, cx, cy, seenFromAbove) {
   if (seenFromAbove) return true;
-  return Math.hypot(px - cx, py - cy) < policeSightRange(weather);
+  return Math.hypot(px - cx, py - cy) <= policeSightRange(weather);
 }
 
-// Grip for a single car, so the driving code can ask the weather instead
-// of reading a boolean off the old time object.
-export function gripForCar(weather, car) {
-  let grip = gripFactor(weather);
-  if (car && car.topSpeed > 600) grip *= 0.97;
-  return grip;
+// Steering grip for one car in this weather — a heavy hauler grips no
+// better than a coupe; the sky is the same for everyone.
+export function gripForCar(weather, _car) {
+  return gripFactor(weather);
 }
 
-// The old main-loop shape: { hour, isNight, raining }. Weather state
-// carries the same three fields, so existing readers keep working while
-// the new systems read the richer numbers above.
 export function weatherAsTime(weather) {
   return { hour: weather.hour, isNight: weather.isNight, raining: weather.raining };
 }

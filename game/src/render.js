@@ -322,7 +322,7 @@ export function createRenderer(canvas) {
     text('An open-world crime story — steal, drive, race, and outrun the law.', FIELD.width / 2, 168, 20, '#e2e8f0', 'center');
     const lines = [
       'WASD / Arrows — move & drive    E — enter / exit car    Q — punch    C — horn',
-      'M — story mission (16)    R — street race (5 circuits, 4 rivals, entry fee)    T — taxi fare    B — buy / collect a business',
+      'M — story mission (20)    R — street race (5 circuits, 4 rivals, entry fee, league season)    T — taxi fare    B — buy / collect a business or property',
       'U — tune your car at Marina Garage    V / J / K — slots / blackjack / roulette at Coral Casino',
       'Z — smuggling runs at the Dockside Pier ($300 and up, streaks pay more)    O — buy / trade in cars at Bay Auto Mall',
       'Mouse wheel — zoom camera    H — help    P — pause    N — mute',
@@ -724,7 +724,7 @@ export function createRenderer(canvas) {
     const lines = [
       'WASD / Arrows — move & drive      Shift — sprint (uses stamina)',
       'E — enter / exit car      Q — punch (chain for combos)      C — horn',
-      'M — story mission (16)      R — street race: 5 circuits, 4 rivals, $800 to the winner      T — taxi fare',
+      'M — story mission (20)      R — street race: 5 circuits, 4 rivals, $800 to the winner, league season      T — taxi fare',
       'B — buy a business at its door / collect its takings (till caps after 4 minutes)',
       'Z — smuggling run at the Dockside Pier: crate pays $300+, streaks pay more, heat grows with the streak',
       'O — buy the featured car at Bay Auto Mall / trade in the car you are driving (rare car changes daily)',

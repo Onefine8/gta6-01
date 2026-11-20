@@ -3,18 +3,31 @@
 // alongside the missions and pays cash, so free roam always has something
 // to do:
 //
-//   - Courier: a chain of package drops against the clock, with a streak
+//   Courier — a chain of package drops against the clock, with a streak
 //     bonus for doing them back to back without a miss.
-//   - Vigilante: fugitives loose in the city — catch them (punch or shoot
-//     them down) before their timer runs out, and the PBPD pays a bounty.
-//   - Shooting range: pop-up targets at the Harbor range, scored on hits
+//   Vigilante — fugitives loose in the city: catch them (punch or shoot
+//     them down) before the timer runs out, and the PBPD pays a bounty.
+//   Shooting range — pop-up targets at the Harbor range, scored on hits
 //     and accuracy, with a leaderboard best to beat.
-//   - Street bets: put cash on a street race rival and watch the odds.
+//   Street bets — put cash on a street race rival and watch the odds.
 //
 // Every activity is pure logic — a seeded random, a dt, and the shared
 // state — so the headless tests can run a whole courier shift, a
 // vigilante hunt and a betting slip in milliseconds.
 import { WORLD } from './config.js';
+
+// A short message on the mission toast line, if the state carries one.
+function tell(state, text, seconds) {
+  if (state.missions) {
+    state.missions.message = text;
+    state.missions.messageTimer = seconds || 3;
+  }
+}
+
+function ricoPos(state) {
+  const ride = state.player.inCar;
+  return ride ? { x: ride.x, y: ride.y } : { x: state.player.x, y: state.player.y };
+}
 
 // --- Courier ----------------------------------------------------------------
 // A courier shift is a chain of drops: each drop pays a base fee plus
@@ -47,30 +60,36 @@ export function createCourierState() {
   };
 }
 
-function tell(state, text, seconds) {
-  if (state && state.missions) {
-    state.missions.message = text;
-    state.missions.messageTimer = seconds || 3;
-  }
+// A drop pays the base fee plus distance from where Rico stood when the
+// drop was assigned — a cross-city run is worth more than a hop.
+function courierPay(fx, fy, stop) {
+  return Math.round(COURIER_BASE_PAY + Math.hypot(stop.x - fx, stop.y - fy) * COURIER_PER_UNIT);
 }
 
-function courierPay(fromX, fromY, to) {
-  const dist = Math.hypot(to.x - fromX, to.y - fromY);
-  return Math.round(COURIER_BASE_PAY + dist * COURIER_PER_UNIT);
+function pickStop(rng, notX, notY) {
+  // A different stop than the last one, with a bounded retry so a tiny
+  // stop list can never spin forever.
+  let next = COURIER_STOPS[Math.floor(rng() * COURIER_STOPS.length)];
+  let guard = 0;
+  while (next.x === notX && next.y === notY && guard < 20) {
+    next = COURIER_STOPS[Math.floor(rng() * COURIER_STOPS.length)];
+    guard += 1;
+  }
+  return next;
 }
 
 export function startCourier(courier, state, random) {
   if (courier.active) return false;
-  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-  const stops = COURIER_STOPS.filter((s) => Math.hypot(s.x - px, s.y - py) > 300);
-  const pick = stops[Math.floor((random || Math.random)() * stops.length)] || COURIER_STOPS[0];
+  const rng = random || Math.random;
+  const pos = ricoPos(state);
+  const far = COURIER_STOPS.filter((s) => Math.hypot(s.x - pos.x, s.y - pos.y) > 300);
+  const pick = far[Math.floor(rng() * far.length)] || COURIER_STOPS[0];
   courier.active = true;
   courier.dx = pick.x;
   courier.dy = pick.y;
   courier.name = pick.name;
   courier.timer = COURIER_DROP_SECONDS;
-  courier.pay = courierPay(px, py, pick);
+  courier.pay = courierPay(pos.x, pos.y, pick);
   courier.drops = 0;
   courier.streak = 0;
   courier.shifts += 1;
@@ -92,32 +111,27 @@ export function stepCourier(courier, state, dt, random) {
     tell(state, `Courier shift over — the ${courier.name} drop went cold. ${courier.drops} drops done, $${courier.earned} earned.`, 4);
     return;
   }
-  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-  if (Math.hypot(px - courier.dx, py - courier.dy) < 110) {
-    const streakBonus = Math.min(courier.streak, COURIER_MAX_STREAK) * COURIER_STREAK_BONUS;
-    const total = courier.pay + streakBonus;
-    state.player.money += total;
-    if (state.stats) state.stats.earned = (state.stats.earned || 0) + total;
-    courier.earned += total;
-    courier.drops += 1;
-    courier.streak += 1;
-    courier.bestStreak = Math.max(courier.bestStreak, courier.streak);
-    tell(state, `Package delivered! +$${total}${streakBonus > 0 ? ` (includes $${streakBonus} streak bonus)` : ''}`, 4);
-    // Next drop: a different stop, with a fresh clock.
-    const rng = random || Math.random;
-    let next = COURIER_STOPS[Math.floor(rng() * COURIER_STOPS.length)];
-    let guard = 0;
-    while ((next.x === courier.dx && next.y === courier.dy) && guard < 20) {
-      next = COURIER_STOPS[Math.floor(rng() * COURIER_STOPS.length)];
-      guard += 1;
-    }
-    courier.dx = next.x;
-    courier.dy = next.y;
-    courier.name = next.name;
-    courier.timer = COURIER_DROP_SECONDS;
-    courier.pay = courierPay(px, py, next);
-  }
+  const pos = ricoPos(state);
+  if (Math.hypot(pos.x - courier.dx, pos.y - courier.dy) >= 110) return;
+  // Drop made: base pay plus a streak bonus that grows per consecutive
+  // drop, capped so a long shift does not pay silly money.
+  const streakBonus = Math.min(courier.streak, COURIER_MAX_STREAK) * COURIER_STREAK_BONUS;
+  const total = courier.pay + streakBonus;
+  state.player.money += total;
+  if (state.stats) state.stats.earned = (state.stats.earned || 0) + total;
+  courier.earned += total;
+  courier.drops += 1;
+  courier.streak += 1;
+  courier.bestStreak = Math.max(courier.bestStreak, courier.streak);
+  tell(state, `Package delivered! +$${total}${streakBonus > 0 ? ` (includes $${streakBonus} streak bonus)` : ''}`, 4);
+  // Next drop: a different stop, with a fresh clock.
+  const rng = random || Math.random;
+  const next = pickStop(rng, courier.dx, courier.dy);
+  courier.dx = next.x;
+  courier.dy = next.y;
+  courier.name = next.name;
+  courier.timer = COURIER_DROP_SECONDS;
+  courier.pay = courierPay(pos.x, pos.y, next);
 }
 
 export function quitCourier(courier, state) {
@@ -154,15 +168,14 @@ export function createVigilanteState() {
 function spawnFugitive(vigilante, state, random) {
   const rng = random || Math.random;
   const def = VIGILANTE_FUGITIVES[vigilante.fugitiveIndex % VIGILANTE_FUGITIVES.length];
-  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+  const pos = ricoPos(state);
   // The fugitive starts a few blocks away, never on top of Rico.
   const angle = rng() * Math.PI * 2;
   const dist = 500 + rng() * 500;
   vigilante.name = def.name;
   vigilante.bounty = def.bounty;
-  vigilante.fx = Math.max(80, Math.min(WORLD.width - 80, px + Math.cos(angle) * dist));
-  vigilante.fy = Math.max(80, Math.min(WORLD.height - 80, py + Math.sin(angle) * dist));
+  vigilante.fx = Math.max(80, Math.min(WORLD.width - 80, pos.x + Math.cos(angle) * dist));
+  vigilante.fy = Math.max(80, Math.min(WORLD.height - 80, pos.y + Math.sin(angle) * dist));
   vigilante.timer = VIGILANTE_HUNT_SECONDS;
   // The fugitive is a pedestrian with a flag, so punches and bullets
   // already know how to hurt them — see weapons.js and player.js.
@@ -183,6 +196,11 @@ export function startVigilante(vigilante, state, random) {
   return true;
 }
 
+export function currentFugitivePed(vigilante, state) {
+  if (!state || !state.peds) return null;
+  return state.peds.find((p) => p.fugitive && p.health > 0) || null;
+}
+
 export function vigilanteObjective(vigilante) {
   if (!vigilante.active) return null;
   const fugitive = currentFugitivePed(vigilante);
@@ -193,21 +211,15 @@ export function vigilanteObjective(vigilante) {
   };
 }
 
-export function currentFugitivePed(vigilante, state) {
-  if (!state || !state.peds) return null;
-  return state.peds.find((p) => p.fugitive && p.health > 0) || null;
-}
-
 // A fugitive on the ground is a catch: punch them down, or shoot them
 // down, and the bounty pays. Returns the bounty, or 0.
 export function checkVigilanteCatch(vigilante, state) {
   if (!vigilante.active) return 0;
   const fugitive = (state.peds || []).find((p) => p.fugitive);
   if (!fugitive) return 0;
-  const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-  const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+  const pos = ricoPos(state);
   const down = fugitive.health <= 0;
-  const grabbed = !down && Math.hypot(fugitive.x - px, fugitive.y - py) < VIGILANTE_CAPTURE_RADIUS && !state.player.inCar;
+  const grabbed = !down && Math.hypot(fugitive.x - pos.x, fugitive.y - pos.y) < VIGILANTE_CAPTURE_RADIUS && !state.player.inCar;
   if (!down && !grabbed) return 0;
   const bounty = vigilante.bounty;
   state.player.money += bounty;
@@ -340,6 +352,17 @@ export function rangeAccuracy(range) {
   return range.hits / range.shots;
 }
 
+function shuffleRangeTargets(range, rng) {
+  for (const t of range.targets) {
+    if (t.hit) continue;
+    if (t.up && rng() < 0.3) t.up = false;
+    else if (!t.up && rng() < 0.25) t.up = true;
+  }
+  if (!range.targets.some((t) => t.up)) {
+    range.targets[Math.floor(rng() * range.targets.length)].up = true;
+  }
+}
+
 export function stepRange(range, state, dt, random) {
   if (!range.active) return;
   range.timer -= dt;
@@ -348,20 +371,14 @@ export function stepRange(range, state, dt, random) {
   range.shuffleTimer = (range.shuffleTimer || 0) - dt;
   if (range.shuffleTimer <= 0) {
     range.shuffleTimer = 2;
-    for (const t of range.targets) {
-      if (t.hit) continue;
-      if (t.up && rng() < 0.3) t.up = false;
-      else if (!t.up && rng() < 0.25) t.up = true;
-    }
-    if (!range.targets.some((t) => t.up)) {
-      range.targets[Math.floor(rng() * range.targets.length)].up = true;
-    }
+    shuffleRangeTargets(range, rng);
   }
   if (range.timer <= 0) {
     range.active = false;
-    const perfect = range.hits >= RANGE_TARGET_COUNT && rangeAccuracy(range) >= 0.99;
+    const allHit = range.hits === range.targets.length;
+    const flawless = range.hits >= 8 && range.shots === range.hits;
     let payout = range.score;
-    if (range.hits === range.targets.length || (range.hits >= 8 && range.shots === range.hits)) {
+    if (allHit || flawless) {
       payout += RANGE_PERFECT_BONUS;
       range.perfects += 1;
     }

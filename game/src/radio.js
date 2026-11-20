@@ -7,11 +7,11 @@
 // playlist left off, the way a real car radio does.
 //
 // Stations:
-//   - Bay FM 101.1: sunny pop for the beach road.
-//   - Palmetto Rock 98.5: loud guitars for a getaway.
-//   - Harbor Talk 720 AM: the city's talk station — news, traffic, and
+//   Bay FM 101.1 — sunny pop for the beach road.
+//   Palmetto Rock 98.5 — loud guitars for a getaway.
+//   Harbor Talk 720 AM — the city's talk station: news, traffic, and
 //     callers who are sure the mayor is hiding something.
-//   - Neon Nights 88.9: late-night electronic for the drive home.
+//   Neon Nights 88.9 — late-night electronic for the drive home.
 //
 // The DJ banter lines are station-flavoured one-liners the main loop can
 // show on the toast line between tracks. Everything is pure logic, so
@@ -171,6 +171,13 @@ export function trackProgress(radio) {
   };
 }
 
+function formatClock(totalSeconds) {
+  const left = Math.max(0, Math.ceil(totalSeconds));
+  const mm = Math.floor(left / 60);
+  const ss = String(left % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
 // One line for the HUD: station, track, artist, and the time left.
 export function radioHudLine(radio) {
   if (radio.muted) return 'Radio muted';
@@ -178,10 +185,7 @@ export function radioHudLine(radio) {
   const station = currentStation(radio);
   const track = currentTrack(radio);
   const progress = trackProgress(radio);
-  const left = Math.ceil(progress.remaining);
-  const mm = Math.floor(left / 60);
-  const ss = String(left % 60).padStart(2, '0');
-  return `${station.name} ${station.frequency} — "${track.title}" by ${track.artist} (${mm}:${ss} left)`;
+  return `${station.name} ${station.frequency} — "${track.title}" by ${track.artist} (${formatClock(progress.remaining)} left)`;
 }
 
 export function radioNowPlaying(radio) {
@@ -201,9 +205,7 @@ export function radioNowPlaying(radio) {
 export function setStation(radio, indexOrId) {
   let index = -1;
   if (typeof indexOrId === 'number') index = indexOrId;
-  else {
-    index = RADIO_STATIONS.findIndex((s) => s.id === indexOrId);
-  }
+  else index = RADIO_STATIONS.findIndex((s) => s.id === indexOrId);
   if (index < 0 || index >= RADIO_STATIONS.length) return false;
   if (index === radio.stationIndex) return true;
   radio.stationIndex = index;
@@ -222,9 +224,27 @@ export function prevStation(radio) {
   return setStation(radio, (radio.stationIndex - 1 + RADIO_STATIONS.length) % RADIO_STATIONS.length);
 }
 
+function notePlayed(radio, station, track) {
+  radio.history.push(`${station.name}: "${track.title}" — ${track.artist}`);
+  if (radio.history.length > 20) radio.history.shift();
+}
+
+// Move the playlist one track on: record the finished song, wrap the
+// index, and let the DJ talk every third track.
+function rollTrack(radio, random) {
+  const station = currentStation(radio);
+  const pos = currentPosition(radio);
+  const finished = station.tracks[pos.trackIndex];
+  notePlayed(radio, station, finished);
+  pos.trackIndex = (pos.trackIndex + 1) % station.tracks.length;
+  pos.trackTimer = 0;
+  radio.tracksPlayed += 1;
+  if (radio.tracksPlayed % 3 === 0) djBanter(radio, random);
+}
+
 // Next / previous track on the current station, wrapping the playlist.
 export function nextTrack(radio, random) {
-  advanceTrack(radio, random);
+  rollTrack(radio, random);
   return currentTrack(radio);
 }
 
@@ -275,23 +295,6 @@ export function djBanter(radio, random) {
   return line;
 }
 
-function recordHistory(radio, station, track) {
-  radio.history.push(`${station.name}: "${track.title}" — ${track.artist}`);
-  if (radio.history.length > 20) radio.history.shift();
-}
-
-function advanceTrack(radio, random) {
-  const station = currentStation(radio);
-  const pos = currentPosition(radio);
-  const finished = station.tracks[pos.trackIndex];
-  recordHistory(radio, station, finished);
-  pos.trackIndex = (pos.trackIndex + 1) % station.tracks.length;
-  pos.trackTimer = 0;
-  radio.tracksPlayed += 1;
-  // Every third track, the DJ says something before the next song.
-  if (radio.tracksPlayed % 3 === 0) djBanter(radio, random);
-}
-
 // Step the radio by dt seconds: the current track advances, and when it
 // ends the next one starts. Muted or paused radios still keep time —
 // the DJ does not wait for Rico to unmute.
@@ -303,7 +306,7 @@ export function stepRadio(radio, dt, random) {
   pos.trackTimer += dt;
   const track = currentTrack(radio);
   if (pos.trackTimer >= track.duration) {
-    advanceTrack(radio, random);
+    rollTrack(radio, random);
   }
 }
 
@@ -332,9 +335,7 @@ export function stationPlaylistLength(station) {
 
 export function stationPlaylistLengthText(station) {
   const total = stationPlaylistLength(station);
-  const mm = Math.floor(total / 60);
-  const ss = String(total % 60).padStart(2, '0');
-  return `${mm}:${ss}`;
+  return formatClock(total);
 }
 
 // One line per station for the title screen: frequency, name, DJ, and
@@ -368,12 +369,13 @@ export function findTrack(query) {
 
 // The longest track on the dial, and the shortest — for the trivia line
 // on the loading screen.
-export function longestTrack() {
+function extremeTrack(longest) {
   let best = null;
   let bestStation = null;
   for (const station of RADIO_STATIONS) {
     for (const track of station.tracks) {
-      if (!best || track.duration > best.duration) {
+      const better = !best || (longest ? track.duration > best.duration : track.duration < best.duration);
+      if (better) {
         best = track;
         bestStation = station;
       }
@@ -382,18 +384,12 @@ export function longestTrack() {
   return { station: bestStation.name, track: best };
 }
 
+export function longestTrack() {
+  return extremeTrack(true);
+}
+
 export function shortestTrack() {
-  let best = null;
-  let bestStation = null;
-  for (const station of RADIO_STATIONS) {
-    for (const track of station.tracks) {
-      if (!best || track.duration < best.duration) {
-        best = track;
-        bestStation = station;
-      }
-    }
-  }
-  return { station: bestStation.name, track: best };
+  return extremeTrack(false);
 }
 
 export function serializeRadio(radio) {

@@ -14,6 +14,12 @@ import { MISSION_DEFS, createMissionState, objectiveText, showMessage, startMiss
 import { MISSION2_DEFS, canStartMission2, createMission2State, mission2ObjectivePos, startMission2, stepMissions2 } from './missions2.js';
 import { MISSION3_DEFS, canStartMission3, createMission3State, mission3ObjectivePos, startMission3, stepMissions3 } from './missions3.js';
 import { MISSION4_DEFS, canStartMission4, createMission4State, mission4ObjectivePos, startMission4, stepMissions4 } from './missions4.js';
+import { MISSION5_DEFS, canStartMission5, createMission5State, mission5ObjectivePos, startMission5, stepMissions5 } from './missions5.js';
+import { PROPERTY_DEFS, buyProperty, canBuyProperty, collectRent, createPropertyState, deserializeProperties, nearestProperty, nearestPropertyWithRent, serializeProperties, stepProperties, totalRentWaiting } from './properties.js';
+import { buildLeagueResults, createLeagueState, deserializeLeague, isLeagueRound, leagueHudLine, recordLeagueRace, serializeLeague } from './league.js';
+import { createTrafficAIState, stepTrafficSystem } from './traffic.js';
+import { createDayNightState, deserializeDayNight, serializeDayNight, stepDayNight } from './daynight.js';
+import { addHeatForStars, createHeatState, deserializeHeat, payBribe, serializeHeat, stepHeat } from './heat.js';
 import { breakSmugglingStreak, createSmugglingState, smugglingObjective, startSmugglingRun, stepSmuggling } from './smuggling.js';
 import { buyDealershipCar, createDealershipState, deserializeDealership, featuredCar, serializeDealership, stepDealership, tradeInCar } from './dealership.js';
 import { buyNextUpgrade, createTuningState, deserializeTuning, serializeTuning, stepTuning } from './tuning.js';
@@ -88,6 +94,12 @@ function createState() {
     missions2: createMission2State(),
     missions3: createMission3State(),
     missions4: createMission4State(),
+    missions5: createMission5State(),
+    properties: createPropertyState(),
+    league: createLeagueState(),
+    trafficAI: createTrafficAIState(),
+    daynight: createDayNightState(),
+    heat: createHeatState(),
     smuggling: createSmugglingState(),
     dealership: createDealershipState(random),
     tuning: createTuningState(),
@@ -115,6 +127,7 @@ function createState() {
     stats: { earned: 0, nearMiss: 0, taxis: 0, racesWon: 0 },
     helpOpen: false,
     pendingSteal: false,
+    prevWanted: 0,
     nearMissCooldown: 0,
     hornCooldown: 0,
     skidCooldown: 0,
@@ -150,6 +163,11 @@ function saveGame() {
       missions2Index: state.missions2.index,
       missions3Index: state.missions3.index,
       missions4Index: state.missions4.index,
+      missions5Index: state.missions5.index,
+      properties: serializeProperties(state.properties),
+      league: serializeLeague(state.league),
+      heat: serializeHeat(state.heat),
+      daynight: serializeDayNight(state.daynight),
       smuggling: { streak: state.smuggling.streak, runs: state.smuggling.runs, earned: state.smuggling.earned, heat: state.smuggling.heat, dropIndex: state.smuggling.dropIndex },
       dealership: serializeDealership(state.dealership),
       tuning: serializeTuning(state.tuning),
@@ -196,6 +214,11 @@ function loadGame() {
     if (typeof data.missions2Index === 'number') state.missions2.index = Math.max(0, Math.min(MISSION2_DEFS.length, data.missions2Index));
     if (typeof data.missions3Index === 'number') state.missions3.index = Math.max(0, Math.min(MISSION3_DEFS.length, data.missions3Index));
     if (typeof data.missions4Index === 'number') state.missions4.index = Math.max(0, Math.min(MISSION4_DEFS.length, data.missions4Index));
+    if (typeof data.missions5Index === 'number') state.missions5.index = Math.max(0, Math.min(MISSION5_DEFS.length, data.missions5Index));
+    if (data.properties && typeof data.properties === 'object') state.properties = deserializeProperties(data.properties);
+    if (data.league && typeof data.league === 'object') state.league = deserializeLeague(data.league);
+    if (data.heat && typeof data.heat === 'object') state.heat = deserializeHeat(data.heat);
+    if (data.daynight && typeof data.daynight === 'object') state.daynight = deserializeDayNight(data.daynight);
     if (data.smuggling && typeof data.smuggling === 'object') {
       if (typeof data.smuggling.streak === 'number') state.smuggling.streak = Math.max(0, data.smuggling.streak);
       if (typeof data.smuggling.runs === 'number') state.smuggling.runs = Math.max(0, data.smuggling.runs);
@@ -243,6 +266,11 @@ function updateObjectivePos() {
     state.objectivePos = mission4ObjectivePos(state.missions4, state);
     return;
   }
+  // The fifth arc owns the arrow while it runs.
+  if (state.missions5.active) {
+    state.objectivePos = mission5ObjectivePos(state.missions5);
+    return;
+  }
   if (!m.active || m.index >= MISSION_DEFS.length) {
     const taxi = taxiObjective(m);
     if (taxi) {
@@ -260,6 +288,17 @@ function updateObjectivePos() {
     if (crate) {
       state.objectivePos = { x: crate.x, y: crate.y };
       return;
+    }
+    // Free roam with rent waiting: point at the nearest owned property
+    // whose till is worth the drive.
+    if (totalRentWaiting(state.properties) >= 200) {
+      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
+      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
+      const prop = nearestPropertyWithRent(state.properties, px, py);
+      if (prop) {
+        state.objectivePos = { x: prop.x, y: prop.y };
+        return;
+      }
     }
     // Free roam with money waiting: point at the nearest owned business
     // whose till is worth the drive.
@@ -285,6 +324,11 @@ function updateTime(dt) {
   const events = stepWeather(state.weather, dt, random);
   state.time = weatherAsTime(state.weather);
   for (const event of events) showMessage(state.missions, event, 3);
+  // The day/night cycle follows the same clock and books dynamic events
+  // — heat waves, fog banks, storm surges — on its own schedule.
+  for (const event of stepDayNight(state.daynight, state.weather, dt, random)) {
+    showMessage(state.missions, event, 3);
+  }
 }
 
 function stepWorld(dt, input) {
@@ -349,6 +393,7 @@ function stepWorld(dt, input) {
   stepMissions2(state.missions2, state, dt, events);
   stepMissions3(state.missions3, state, dt, events);
   stepMissions4(state.missions4, state, dt, events);
+  stepMissions5(state.missions5, state, dt, events);
   stepSmuggling(state.smuggling, state, dt);
   stepDealership(state.dealership, state, dt, random);
   stepTuning(state, dt, input);
@@ -357,9 +402,31 @@ function stepWorld(dt, input) {
   collectWeaponPickups(state);
   stepMinigames(state.minigames, state, dt, random);
   stepRadio(state.radio, dt, random);
+  // League rounds are recorded from a snapshot: finishRace clears the
+  // rivals, so the finishing order has to be captured before the step.
+  const raceWasActive = state.race.active;
+  const raceCircuit = state.race.circuitIndex;
+  const raceRivals = state.race.rivals.map((r) => ({ ...r }));
   stepRace(state.race, state, dt, random);
+  if (raceWasActive && !state.race.active && state.race.playerPlace > 0 && isLeagueRound(state.league, raceCircuit)) {
+    // finishRace leaves the final time on race.timer; the rivals come
+    // from the snapshot taken before the step cleared them.
+    const results = buildLeagueResults({ rivals: raceRivals }, state.race.timer);
+    const report = recordLeagueRace(state.league, raceCircuit, results, state);
+    if (report && report.champion) {
+      pushFeed(state, `League season ${report.season} champion: ${report.champion}`);
+      saveGame();
+    }
+  }
   stepTaxi(state.missions, state, dt);
   stepBusinesses(state.business, state, dt);
+  stepProperties(state.properties, state, dt);
+  stepTrafficSystem(state.trafficAI, state.traffic, dt, random, state);
+  // Heat: the precinct remembers where the crime happened. A rising
+  // wanted level heats the district Rico is standing in.
+  if (state.wanted > state.prevWanted) addHeatForStars(state.heat, state, state.wanted - state.prevWanted);
+  state.prevWanted = state.wanted;
+  stepHeat(state.heat, state, dt);
   updateObjectivePos();
 
   // Hidden packages: walk or drive over one to collect it ($100 each).
@@ -397,6 +464,12 @@ function stepWorld(dt, input) {
   if (state.missions4.done) {
     state.missionsDone = Math.max(state.missionsDone, 13 + state.missions4.index);
     state.missions4.done = false;
+    audio.fanfare();
+    saveGame();
+  }
+  if (state.missions5.done) {
+    state.missionsDone = Math.max(state.missionsDone, 16 + state.missions5.index);
+    state.missions5.done = false;
     audio.fanfare();
     saveGame();
   }
@@ -550,6 +623,22 @@ function runGame() {
             } else if (m4.failed) {
               startMission4(m4, m4.index);
               announce('Mission restarted.');
+            } else if (!m4.active && m4.index >= MISSION4_DEFS.length) {
+              // Fourth arc done: M opens the fifth arc (missions 17-20).
+              const m5 = state.missions5;
+              if (!m5.active && m5.index < MISSION5_DEFS.length) {
+                const whyNot = canStartMission5(state, m5.index);
+                if (whyNot) {
+                  showMessage(m, whyNot, 4);
+                } else {
+                  startMission5(m5, m5.index);
+                  audio.click();
+                  announce(`${MISSION5_DEFS[m5.index].title} started.`);
+                }
+              } else if (m5.failed) {
+                startMission5(m5, m5.index);
+                announce('Mission restarted.');
+              }
             }
           }
         }
@@ -640,8 +729,32 @@ function runGame() {
       const py = state.player.inCar ? state.player.inCar.y : state.player.y;
       const biz = nearestBusiness(px, py);
       if (!biz) {
-        const names = BUSINESS_DEFS.map((b) => b.name).join(', ');
-        showMessage(state.missions, `Businesses for sale: ${names}. Stand at one's front door and press B.`, 5);
+        // No business here — maybe a property: buy it, or collect its rent.
+        const prop = nearestProperty(px, py);
+        if (!prop) {
+          const names = BUSINESS_DEFS.map((b) => b.name).join(', ');
+          showMessage(state.missions, `Businesses for sale: ${names}. Stand at one's front door and press B.`, 5);
+        } else if (state.properties.owned[prop.id]) {
+          const amount = collectRent(state, prop.id);
+          if (amount > 0) {
+            audio.pickup();
+            pushFeed(state, `Collected ${prop.name} rent  +$${amount}`);
+            showMessage(state.missions, `Collected $${amount} rent from the ${prop.name}.`, 4);
+            saveGame();
+          } else {
+            showMessage(state.missions, `The ${prop.name} rent till is empty — rent pays every minute.`, 3);
+          }
+        } else {
+          const whyNot = canBuyProperty(state, prop.id);
+          if (whyNot) {
+            showMessage(state.missions, whyNot, 4);
+          } else if (buyProperty(state, prop.id)) {
+            audio.fanfare();
+            pushFeed(state, `Bought the ${prop.name}  -$${prop.price}`);
+            showMessage(state.missions, `You own the ${prop.name} now — it earns rent every minute. Press B here to collect.`, 5);
+            saveGame();
+          }
+        }
       } else if (state.business.owned[biz.id]) {
         const amount = collectBusiness(state, biz.id);
         if (amount > 0) {
@@ -729,6 +842,17 @@ function runGame() {
           audio.repair();
           pushFeed(state, `Patched up at Bay General  -$${HEAL_COST}`);
           showMessage(state.missions, 'Bay General patched you up — full health.', 3);
+        }
+      } else if (state.wanted > 0) {
+        // Nowhere to repair — but a bent cop will take cash to knock a
+        // star off. G pays the bribe when Rico is wanted.
+        const report = payBribe(state, state.heat);
+        if (report.ok) {
+          audio.click();
+          pushFeed(state, `Bribe paid  -$${report.cost} — wanted now ${report.stars} star${report.stars === 1 ? '' : 's'}`);
+          saveGame();
+        } else {
+          showMessage(state.missions, report.reason, 4);
         }
       } else {
         showMessage(state.missions, 'Repairs happen at Marina Garage; healing at Bay General.', 3);

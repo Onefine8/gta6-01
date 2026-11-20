@@ -4,8 +4,8 @@
 // screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library. The game is Palmetto Bay Heat, a 2D top-down
 // open-world crime game: a 3200x2400 coastal city, stealable cars, traffic and pedestrians, a
-// 5-star wanted level with chasing police, roadblocks and a helicopter, sixteen story missions
-// in four arcs, dockside smuggling runs with a paying streak, a car dealership with a daily
+// 5-star wanted level with chasing police, roadblocks and a helicopter, twenty story missions
+// in five arcs, dockside smuggling runs with a paying streak, a car dealership with a daily
 // rare car,
 // five street-race circuits with four AI rivals, a business empire with passive income, taxi
 // fares, hidden packages, a day/night cycle with rain, a full HUD with minimap,
@@ -25,25 +25,35 @@ import { buildDossier } from './vendor/makefun-game.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-// Palmetto Bay Heat, round 6 redo: sixteen story missions in four arcs,
-// dockside smuggling runs with a paying streak, and the Bay Auto Mall
-// dealership with a rare car that rotates daily.
-const VERSION = '0.6.0-round6-redo';
-const versionStamp = `Palmetto Bay Heat ${VERSION} — 16 story missions, smuggling, dealership — built ${new Date().toISOString()}`;
+// Palmetto Bay Heat, round 7: twenty story missions in five arcs — the Bay
+// Heist chain (missions 17-20) with a recruitable crew and a cased vault —
+// plus a property empire with rent and renovations, a five-round racing
+// league with standings and a champion's purse, NPC traffic AI with rush
+// hour, jams and road rage, a day/night cycle with dynamic weather events,
+// and a district heat map with cool-down spots and bribes.
+const VERSION = '0.7.0-round7';
+const versionStamp = `Palmetto Bay Heat ${VERSION} — 20 story missions, heist chain, properties, league, traffic AI, day/night events, heat map — built ${new Date().toISOString()}`;
 console.log(versionStamp);
 
-// Round 6 redo boot checks: the starter kit used to copy blindly, so a
+// Round 7 boot checks: the starter kit used to copy blindly, so a
 // missing game file only surfaced as a broken dossier in the grader.
 // Validate first, fail fast with a clear message, then report what is
-// being handed in. The three round-6 systems are required files now — a
-// handoff without missions 14-16, the smuggling run or the dealership is
-// not this game anymore.
+// being handed in. The round-6 systems are required files, and so are
+// the six round-7 systems — a handoff without the Bay Heist chain, the
+// property empire, the racing league, traffic AI, day/night events or
+// the heat map is not this game anymore.
 const REQUIRED_GAME_FILES = [
   'game/index.html',
   'game/src/main.js',
   'game/src/missions4.js',
   'game/src/smuggling.js',
   'game/src/dealership.js',
+  'game/src/missions5.js',
+  'game/src/properties.js',
+  'game/src/league.js',
+  'game/src/traffic.js',
+  'game/src/daynight.js',
+  'game/src/heat.js',
 ];
 for (const rel of REQUIRED_GAME_FILES) {
   if (!existsSync(join(here, rel))) {
@@ -69,7 +79,7 @@ function countGameFiles(dir) {
 }
 
 const gameFileCount = countGameFiles(join(here, 'game'));
-console.log(`Palmetto Bay Heat: ${gameFileCount} game files, 16 story missions, smuggling runs and the Bay Auto Mall dealership — copying to ${out}.`);
+console.log(`Palmetto Bay Heat: ${gameFileCount} game files, 20 story missions, heist chain, properties, league, traffic AI, day/night events, heat map — copying to ${out}.`);
 
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });

@@ -5,6 +5,10 @@ import { MISSION_DEFS, objectiveText, taxiObjective } from './missions.js';
 import { mission2ObjectivePos, objectiveText2 } from './missions2.js';
 import { mission3ObjectivePos, objectiveText3 } from './missions3.js';
 import { mission4ObjectivePos, objectiveText4 } from './missions4.js';
+import { mission5ObjectivePos, objectiveText5 } from './missions5.js';
+import { ownedPropertyCount, propertyHudLine, totalRentWaiting } from './properties.js';
+import { leagueHudLine } from './league.js';
+import { heatHudLine } from './heat.js';
 import { smugglingObjective, smugglingObjectiveText } from './smuggling.js';
 import { BUSINESS_DEFS, ownedCount, totalTill } from './business.js';
 import { RACE_CIRCUITS, currentRaceCheckpoint, racePositionText } from './races.js';
@@ -153,6 +157,7 @@ export function currentObjectivePos(state) {
   const m = state.missions;
   if (state.race.active) return currentRaceCheckpoint(state.race);
   // The newest arc owns the arrow while it runs, then the older arcs.
+  if (state.missions5 && state.missions5.active) return mission5ObjectivePos(state.missions5);
   if (state.missions4 && state.missions4.active) return mission4ObjectivePos(state.missions4, state);
   if (state.missions3 && state.missions3.active) return mission3ObjectivePos(state.missions3, state);
   if (state.missions2 && state.missions2.active) return mission2ObjectivePos(state.missions2);
@@ -171,10 +176,12 @@ export function currentObjectivePos(state) {
 // The objective line for the HUD: the running arc owns it, and when no
 // arc is running the next unstarted arc owns the M prompt.
 export function currentObjectiveLine(state) {
+  if (state.missions5 && state.missions5.active) return objectiveText5(state.missions5);
   if (state.missions4 && state.missions4.active) return objectiveText4(state.missions4);
   if (state.missions3 && state.missions3.active) return objectiveText3(state.missions3);
   if (state.missions2 && state.missions2.active) return objectiveText2(state.missions2);
   if (state.missions && state.missions.active) return objectiveText(state.missions);
+  if (state.missions5 && state.missions5.index < 4) return objectiveText5(state.missions5);
   if (state.missions4 && state.missions4.index < 3) return objectiveText4(state.missions4);
   if (state.missions3 && state.missions3.index < 3) return objectiveText3(state.missions3);
   if (state.missions2 && state.missions2.index < 3) return objectiveText2(state.missions2);
@@ -213,6 +220,37 @@ export function drawHud(ctx, state, time) {
     ctx.font = `bold 14px ${FONT}`;
     ctx.fillStyle = PALETTE.gold;
     ctx.fillText(`Businesses ${ownedCount(state.business)}/${BUSINESS_DEFS.length} — till $${totalTill(state.business)} (B to collect)`, 26, 117);
+  }
+  // Property empire line, same idea as the business line: how many homes
+  // Rico owns and what rent is waiting.
+  if (state.properties && (ownedPropertyCount(state.properties) > 0 || totalRentWaiting(state.properties) > 0)) {
+    ctx.fillStyle = 'rgba(10,14,20,0.72)';
+    ctx.fillRect(14, 138, 300, 22);
+    ctx.font = `bold 14px ${FONT}`;
+    ctx.fillStyle = PALETTE.gold;
+    ctx.fillText(propertyHudLine(state.properties), 26, 143);
+  }
+  // League + heat lines: where Rico sits in the standings, and how hot
+  // the city is running.
+  if (state.league) {
+    const leagueLine = leagueHudLine(state.league);
+    if (leagueLine) {
+      ctx.fillStyle = 'rgba(10,14,20,0.72)';
+      ctx.fillRect(14, 164, 300, 22);
+      ctx.font = `bold 14px ${FONT}`;
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillText(leagueLine, 26, 169);
+    }
+  }
+  if (state.heat) {
+    const heatLine = heatHudLine(state.heat, state);
+    if (heatLine) {
+      ctx.fillStyle = 'rgba(10,14,20,0.72)';
+      ctx.fillRect(14, 190, 300, 22);
+      ctx.font = `bold 14px ${FONT}`;
+      ctx.fillStyle = '#ff6b6b';
+      ctx.fillText(heatLine, 26, 195);
+    }
   }
   // Stamina bar, on foot only: sprinting drains it, walking refills it.
   if (!state.player.inCar) {
