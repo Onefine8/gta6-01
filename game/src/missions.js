@@ -1,572 +1,646 @@
-// Palmetto Bay Heat — the first story arc (missions 1-7) and the taxi job.
-// Rico works his way up from a borrowed coupe to the kingpin's ledger:
-// every mission is a small job board entry with an intro, a chain of
-// objectives, a payout and a way to blow it. The engine below is a
-// dispatch table: each objective kind has one handler that reads the
-// shared state, advances its own progress, and hands the job to the next
-// objective when its condition is met. Nothing here draws anything —
-// the renderer only reads the objective text and the live meters.
-//
-// Objective kinds in this arc:
-//   goto   — stand (or drive) inside the ring
-//   steal  — be driving the named car
-//   escape — get the wanted level back to zero
-//   crack  — channel inside the gold ring while the alarm climbs
-//   grab   — stand on the loot and take it
-//   sneak  — channel the container lock while the yard guards patrol
-//   fight  — put the kingpin's bodyguards down
-import { CONTAINER, HEIST, KINGPIN } from './config.js';
-import { addWanted } from './police.js';
-import { damagePlayer } from './player.js';
+// missions.js — the 8 story missions of Meridian Heat. Each mission is a
+// small state machine (stage 0..n) driven by the world: waypoints, timers,
+// deliveries, kills, races. Owns G.missions. Progress (completed ids, money)
+// is persisted through G.save when available.
 
-// Distance helper — the whole arc measures Rico against rings this way.
-function dist(ax, ay, bx, by) {
-  return Math.hypot(ax - bx, ay - by);
+import * as configModule from './config.js';
+import * as randomModule from './random.js';
+
+const CFG = configModule.CONFIG ?? configModule.default ?? {};
+const mulberry32 = randomModule.mulberry32 ?? randomModule.default ?? null;
+
+// ---------------------------------------------------------------- helpers
+
+function cfg(G, key, fallback) {
+  const c = G.cfg ?? CFG;
+  const v = c == null ? undefined : c[key];
+  return v === undefined || v === null ? fallback : v;
 }
 
-function ricoPos(state) {
-  const ride = state.player.inCar;
-  return ride ? { x: ride.x, y: ride.y } : { x: state.player.x, y: state.player.y };
+/** A callable RNG from G.rng (the createRng bundle) or a fresh mulberry32. */
+function rngFn(G) {
+  const r = G.rng;
+  if (typeof r === 'function') return r;
+  if (r && typeof r.next === 'function') return r.next;
+  if (mulberry32) return mulberry32(G.seed ?? 7);
+  return Math.random;
 }
+
+function three() {
+  return typeof globalThis !== 'undefined' ? globalThis.THREE : undefined;
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function emit(G, name, data) {
+  try {
+    G.events?.emit?.(name, data);
+  } catch (e) { /* best-effort */ }
+}
+
+/** Map my sound names onto the audio module's real play() names. */
+const SOUND_MAP = {
+  hurt: 'crash', wasted: 'missionFail', door: 'doorSlam', steal: 'uiClick',
+  bump: 'crash', checkpoint: 'pickup', delivery: 'pickup', ambush: 'wantedUp',
+  cash: 'pickup', package: 'pickup', 'race-start': 'horn',
+  'race-win': 'missionComplete', 'race-lose': 'missionFail',
+  'mission-start': 'uiClick', 'mission-pass': 'missionComplete',
+  'mission-fail': 'missionFail', siren: 'wantedUp', busted: 'missionFail',
+  kill: 'pickup', 'shot-smg': 'shot', 'shot-enemy': 'shot', reload: 'reload',
+  crash: 'crash', shot: 'shot', engine: null, footstep: 'footstep',
+};
+
+function sfx(G, name) {
+  try {
+    const mapped = Object.prototype.hasOwnProperty.call(SOUND_MAP, name)
+      ? SOUND_MAP[name] : name;
+    if (mapped) G.audio?.play?.(mapped);
+  } catch (e) { /* audio is best-effort */ }
+}
+
+function dist2D(a, b) {
+  return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+function persist(G) {
+  try {
+    G.save?.save?.(G);
+  } catch (e) { /* best-effort */ }
+}
+
+// ---------------------------------------------------------------- pure data (tested)
+
+/** District anchors on the city map (x, z). Pure data. Aligned with the
+ * world module's landmarks and spawn points so every waypoint is reachable
+ * by road (garage doors sit just off a road; waypoints use the road side). */
+export const PLACES = {
+  marasGarage: { x: -18, z: 108, name: "Mara's Garage" },
+  garageRoad: { x: 0, z: 108, name: "Mara's Garage" },
+  harborDepot: { x: 300, z: -60, name: 'Harbor Depot' },
+  pier9: { x: 340, z: 30, name: 'Pier 9' },
+  downtown: { x: 0, z: 0, name: 'Downtown' },
+  meridianTower: { x: 0, z: -136, name: 'Meridian Tower' },
+  hillsWarehouse: { x: -216, z: -192, name: 'Hills Warehouse' },
+  beachfront: { x: 60, z: 300, name: 'Beachfront' },
+  harborLoop: { x: 144, z: 72, name: 'Harbor Loop' },
+};
 
 export const MISSION_DEFS = [
-  {
-    id: 1,
-    title: 'Wheels Up',
-    giver: 'Marina',
-    intro: 'Marina: "Rico, you are back. I need wheels — borrow that Sunset Coupe by the Coral Hotel and bring it to my garage. Try not to scratch it."',
-    reward: 400,
-    failText: 'The coupe was wrecked. Marina is not paying for scrap.',
-    steps: [
-      { kind: 'steal', text: 'Steal the Sunset Coupe near Coral Hotel', x: 2960, y: 260, radius: 90 },
-      { kind: 'goto', text: 'Drive the coupe to Marina Garage', x: 360, y: 360, radius: 110, needCar: true },
-    ],
-  },
-  {
-    id: 2,
-    title: 'Bayfront Dash',
-    giver: 'Marina',
-    intro: 'Marina: "A buyer is waiting at Lighthouse Point with cash. Three drops, one route, and the clock is running. The cops are jumpy tonight — keep it clean."',
-    reward: 900,
-    failText: 'Too slow — the buyer walked away.',
-    timeLimit: 150,
-    steps: [
-      { kind: 'goto', text: 'Drop 1 of 3: Harbor Market', x: 360, y: 2060, radius: 110 },
-      { kind: 'goto', text: 'Drop 2 of 3: Coral Hotel', x: 2960, y: 260, radius: 110 },
-      { kind: 'goto', text: 'Drop 3 of 3: Lighthouse Point', x: 2960, y: 2060, radius: 110 },
-    ],
-  },
-  {
-    id: 3,
-    title: 'Heat Wave',
-    giver: 'Dante',
-    intro: 'Dante: "The whole department is on us after that dash. Lose them, all of them — then meet me at the park. No cops on your tail, or no deal."',
-    reward: 1200,
-    failText: 'Busted. Dante will not wait around for a jailbird.',
-    steps: [
-      { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
-      { kind: 'goto', text: 'Meet Dante at Palmetto Park', x: 1400, y: 1000, radius: 110 },
-    ],
-  },
-  {
-    id: 4,
-    title: 'Harbor Heist',
-    giver: 'Dante',
-    intro: 'Dante: "Last job, Rico — the big one. Take the Harbor Van from the market, run it to Lighthouse Point, then vanish. The whole precinct will be looking for that van."',
-    reward: 2000,
-    failText: 'The van never made it. Dante is done with you.',
-    timeLimit: 180,
-    steps: [
-      { kind: 'steal', model: 'Harbor Van', text: 'Steal the Harbor Van near Harbor Market', x: 360, y: 2060, radius: 120 },
-      { kind: 'goto', text: 'Deliver the van to Lighthouse Point', x: 2960, y: 2060, radius: 110, needCar: true },
-      { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
-    ],
-  },
-  {
-    id: 5,
-    title: 'Downtown Heist',
-    giver: 'Dante',
-    intro: 'Dante: "The big one, Rico — the Downtown bank. Get inside, crack the vault, grab the cash and vanish before the whole precinct shows up. Quick and quiet pays double."',
-    reward: 3500,
-    failText: 'The vault never opened — Dante is done waiting.',
-    timeLimit: 240,
-    steps: [
-      { kind: 'goto', text: 'Get to the Downtown bank', x: 2800, y: 1200, radius: 110 },
-      { kind: 'crack', text: 'Crack the vault — stay inside the gold ring', x: 2800, y: 1000, radius: 100 },
-      { kind: 'grab', text: 'Grab the cash from the vault room', x: 2600, y: 1200, radius: 100 },
-      { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
-    ],
-  },
-  {
-    id: 6,
-    title: 'Container Heist',
-    giver: 'Dante',
-    intro: 'Dante: "One more job before the big one, Rico — the harbor container yard. Slip past the guards, crack the lock on the marked container, jack the hauler and bring it to Marina Garage. Quiet is cheaper than loud."',
-    reward: 4500,
-    failText: 'The container job went sideways — Dante is done waiting.',
-    timeLimit: 300,
-    sneakSeconds: 12,
-    steps: [
-      { kind: 'goto', text: 'Slip into the harbor container yard', x: 500, y: 2050, radius: 130 },
-      { kind: 'sneak', text: 'Crack the container lock — stay in the yard, dodge the guards', x: 500, y: 2050, radius: 130 },
-      { kind: 'steal', model: 'Container Hauler', text: 'Steal the Container Hauler', x: 500, y: 2050, radius: 150 },
-      { kind: 'goto', text: 'Deliver the hauler to Marina Garage', x: 360, y: 360, radius: 110, needCar: true },
-      { kind: 'escape', text: 'Lose the police — get your wanted level to zero', x: 0, y: 0, radius: 0 },
-    ],
-  },
-  {
-    id: 7,
-    title: 'Kingpin Takedown',
-    giver: 'Dante',
-    intro: 'Dante: "This is it, Rico — the kingpin himself, holed up in the Coral Heights penthouse with his bodyguards and his ledger. Put his crew down, crack his safe, take the ledger and vanish. Do this and Palmetto Bay is ours."',
-    reward: 8000,
-    failText: 'The kingpin is still standing — and now he knows your name.',
-    timeLimit: 360,
-    crackSeconds: 12,
-    fightCount: 4,
-    steps: [
-      { kind: 'goto', text: "Storm the kingpin's compound in Coral Heights", x: 2800, y: 400, radius: 120 },
-      { kind: 'fight', text: "Take down the kingpin's bodyguards", x: 2800, y: 400, radius: 160 },
-      { kind: 'crack', text: "Crack the kingpin's safe — stay in the gold ring", x: 2800, y: 260, radius: 100 },
-      { kind: 'grab', text: "Take the kingpin's ledger", x: 2600, y: 400, radius: 100 },
-      { kind: 'escape', text: 'Lose the 5-star heat — vanish', x: 0, y: 0, radius: 0 },
-    ],
-  },
+  { id: 1, name: 'First Wheels', reward: 500, brief: 'Steal a car and bring it to Mara\'s garage.' },
+  { id: 2, name: 'Courier Run', reward: 800, timeLimit: 240, brief: 'Deliver 3 packages before the clock runs out.' },
+  { id: 3, name: 'Getaway', reward: 1200, timeLimit: 60, brief: 'Lose a 2-star wanted level for 60 seconds.' },
+  { id: 4, name: 'Rival Rumble', reward: 1500, brief: 'Clear the Kroll gunmen off Pier 9.' },
+  { id: 5, name: 'Midnight Race', reward: 2000, timeLimit: 180, brief: 'Win the 3-lap street race at the Harbor loop.' },
+  { id: 6, name: 'The Pickup', reward: 2500, brief: 'Pick up Mara, then run the ambush to the port.' },
+  { id: 7, name: 'Harbor Heist', reward: 4000, brief: 'Steal the courier truck and deliver it to the Hills warehouse.' },
+  { id: 8, name: 'King of Meridian', reward: 10000, brief: 'Beat Dante, lose the cops, finish it on the tower roof.' },
 ];
 
-// Taxi side job: the same eight stops the city has always used — a fare is
-// a pickup somewhere that is not on top of Rico, then a different drop-off.
-export const TAXI_STOPS = [
-  { x: 400, y: 400, name: 'Marina Garage' },
-  { x: 2800, y: 400, name: 'Coral Hotel' },
-  { x: 400, y: 2000, name: 'Harbor Market' },
-  { x: 2800, y: 2000, name: 'Lighthouse Point' },
-  { x: 1400, y: 1000, name: 'Palmetto Park' },
-  { x: 2000, y: 1200, name: 'Downtown' },
-  { x: 1200, y: 2000, name: 'Bay General Hospital' },
-  { x: 2000, y: 400, name: '5th Avenue' },
-];
+/** Mission definition by id, or null. Pure. */
+export function defFor(id) {
+  return MISSION_DEFS.find((d) => d.id === id) ?? null;
+}
 
-export function createMissionState() {
+/** Cash reward for a mission id. Pure. */
+export function rewardFor(id) {
+  return defFor(id)?.reward ?? 0;
+}
+
+/** Fresh runtime state for a mission id. Pure. */
+export function createMission(id) {
+  const def = defFor(id);
+  if (!def) return null;
   return {
-    index: 0, // which mission of MISSION_DEFS is next (0-based); >= length = story done
-    step: 0,
-    active: false,
-    introTimer: 0,
-    introText: '',
-    timer: 0,
-    failed: false,
-    failText: '',
-    done: false,
-    taxi: { active: false, phase: '', px: 0, py: 0, dx: 0, dy: 0, name: '', timer: 0, fare: 0 },
-    // Vault/safe live meters: crack progress 0..1, alarm 0..100, how many
-    // alarm stars have already been called in, and the alarm reading at
-    // the moment the loot was grabbed (decides the quiet bonus).
-    heist: { crack: 0, alarm: 0, alarmStars: 0, grabAlarm: null },
-    // Container lock live meters: crack progress 0..1 and how spotted
-    // Rico is by the yard guards (0..100).
-    sneak: { progress: 0, spot: 0 },
-    guards: [],
-    bodyguardsSpawned: false,
-    fightDown: 0,
-    packagesFound: 0,
-    message: '',
-    messageTimer: 0,
+    id,
+    name: def.name,
+    status: 'active', // 'active' | 'passed' | 'failed'
+    stage: 0,
+    timer: def.timeLimit ?? 0,
+    timerMax: def.timeLimit ?? 0,
+    waypoint: null,
+    objectives: [],
+    data: {},
+    failReason: null,
+    startedAt: 0,
   };
 }
 
-export function startMission(missions, index) {
-  const def = MISSION_DEFS[index];
-  if (!def) return null;
-  missions.index = index;
-  missions.step = 0;
-  missions.active = true;
-  missions.failed = false;
-  missions.done = false;
-  missions.introText = def.intro;
-  missions.introTimer = 6;
-  missions.timer = def.timeLimit || 0;
-  missions.heist = { crack: 0, alarm: 0, alarmStars: 0, grabAlarm: null };
-  missions.sneak = { progress: 0, spot: 0 };
-  missions.guards = [];
-  missions.bodyguardsSpawned = false;
-  missions.fightDown = 0;
-  missions.message = `${def.title} — ${def.giver}`;
-  missions.messageTimer = 4;
-  return def;
+/** Is `pos` within `radius` of `target` (XZ plane)? Pure. */
+export function atWaypoint(pos, target, radius) {
+  if (!pos || !target) return false;
+  return dist2D(pos, target) <= radius;
 }
 
-export function currentStep(missions) {
-  const def = MISSION_DEFS[missions.index];
-  if (!def || !missions.active) return null;
-  return def.steps[missions.step] || null;
-}
-
-export function objectiveText(missions) {
-  if (!missions.active) {
-    if (missions.index >= MISSION_DEFS.length) return 'Story complete — free roam. Press M for the next job board.';
-    return 'Press M to start the next mission.';
+/**
+ * Advance a checkpoint race: returns the new {lap, checkpoint} after the
+ * player reaches `reachedIndex` (or unchanged when it is not the next one).
+ * Pure.
+ */
+export function advanceCheckpoint(race, reachedIndex) {
+  const total = race.checkpoints.length;
+  if (reachedIndex !== race.checkpoint) return race;
+  let { lap, checkpoint } = race;
+  checkpoint += 1;
+  if (checkpoint >= total) {
+    checkpoint = 0;
+    lap += 1;
   }
-  const step = currentStep(missions);
-  if (!step) return '';
-  // Live counters ride on the objective line so the HUD is the progress bar.
-  if (step.kind === 'sneak') return `${step.text} — ${Math.round(missions.sneak.progress * 100)}%`;
-  if (step.kind === 'fight') {
-    const def = MISSION_DEFS[missions.index];
-    return `${step.text} (${missions.fightDown}/${def.fightCount || KINGPIN.fightCount})`;
-  }
-  return step.text;
+  return { ...race, lap, checkpoint };
 }
 
-export function showMessage(missions, text, seconds) {
-  missions.message = text;
-  missions.messageTimer = seconds || 3;
+/** Has the race reached its final lap/checkpoint? Pure. */
+export function raceFinished(race, laps) {
+  return race.lap >= laps;
 }
 
-// --- Container Heist yard guards -------------------------------------------
-// Two PBPD cruisers loop the roads around the container yard while Rico is
-// sneaking or stealing. They belong to the mission, not to the police
-// spawner, so they exist exactly while the job needs them and vanish when
-// it moves on. Each guard walks a four-corner beat; reaching a corner
-// picks the next one.
-const GUARD_BEAT = [
-  { x: 380, y: 1620 },
-  { x: 820, y: 1620 },
-  { x: 820, y: 2020 },
-  { x: 380, y: 2020 },
-];
+// ---------------------------------------------------------------- waypoint marker
 
-function fieldGuards(missions) {
-  missions.guards = GUARD_BEAT.slice(0, 2).map((corner, i) => ({
-    x: corner.x, y: corner.y, angle: 0, speed: 0, corner: i + 1,
-    color: '#1d4ed8', model: 'PBPD Cruiser', topSpeed: CONTAINER.guardSpeed,
-    health: 100, parked: false, driver: 'guard', stolen: false, lightPhase: i * 2,
-  }));
+function buildMarker(G) {
+  const T = three();
+  if (!T) return null;
+  const geo = new T.CylinderGeometry(2.2, 2.2, 30, 12, 1, true);
+  const mat = new T.MeshBasicMaterial({
+    color: 0xffd23f, transparent: true, opacity: 0.28, side: T.DoubleSide, depthWrite: false,
+  });
+  const mesh = new T.Mesh(geo, mat);
+  mesh.position.y = 15;
+  mesh.visible = false;
+  G.scene?.add?.(mesh);
+  return mesh;
 }
 
-function marchGuards(missions, dt) {
-  for (const guard of missions.guards) {
-    const corner = GUARD_BEAT[guard.corner % GUARD_BEAT.length];
-    const d = dist(guard.x, guard.y, corner.x, corner.y);
-    if (d < 24) {
-      guard.corner += 1;
-      continue;
-    }
-    guard.angle = Math.atan2(corner.y - guard.y, corner.x - guard.x);
-    guard.x += Math.cos(guard.angle) * CONTAINER.guardSpeed * dt;
-    guard.y += Math.sin(guard.angle) * CONTAINER.guardSpeed * dt;
-    guard.lightPhase += dt * 9;
-  }
-}
+// ---------------------------------------------------------------- module
 
-// --- Kingpin Takedown bodyguards -------------------------------------------
-// Four enforcers hold the compound. They are pedestrians with a flag, so
-// the normal punch and bullet code already hurts them — they just chase
-// Rico and hit back instead of fleeing.
-const BODYGUARD_POSTS = [
-  { x: 2710, y: 330 },
-  { x: 2890, y: 330 },
-  { x: 2710, y: 470 },
-  { x: 2890, y: 470 },
-];
+export function init(G) {
+  const rng = rngFn(G);
+  G.missions = {
+    defs: MISSION_DEFS,
+    current: null,
+    currentIndex: 0,
+    completed: [],
+    unlocked: 1,
+    attempts: {},
+    _rng: rng,
+    _marker: null,
+    _raceRival: null,
+    _maraTimer: 0,
 
-function fieldBodyguards(missions, state) {
-  // A retry must not stack a second crew on the leftovers of the first.
-  state.peds = state.peds.filter((p) => !p.bodyguard);
-  for (const post of BODYGUARD_POSTS) {
-    state.peds.push({
-      x: post.x, y: post.y, angle: Math.PI / 2, speed: 0,
-      color: '#7f1d1d', walkPhase: 0, fleeing: false, fleeTimer: 0,
-      changeTimer: 99, health: KINGPIN.bodyguardHealth,
-      bodyguard: true, down: false,
-    });
-  }
-  missions.bodyguardsSpawned = true;
-}
+    /** Fresh-game reset (menu "New Game"). */
+    reset() {
+      G.missions._cleanup();
+      G.missions.current = null;
+      G.missions.currentIndex = 0;
+      G.missions.completed = [];
+      G.missions.unlocked = 1;
+      G.missions.attempts = {};
+    },
 
-function workBodyguards(missions, state, dt) {
-  const player = state.player;
-  let down = 0;
-  for (const ped of state.peds) {
-    if (!ped.bodyguard) continue;
-    if (ped.health <= 0) {
-      if (!ped.down) {
-        ped.down = true;
-        ped.color = '#4b5563';
-        showMessage(missions, 'Bodyguard down!', 2);
+    /** Alias used by the screenshot stager: index 0 -> mission 1. */
+    start(index) {
+      return G.missions.startMission((index ?? 0) + 1);
+    },
+
+    /** The next mission the player can start (lowest incomplete id). */
+    nextAvailable() {
+      for (const d of MISSION_DEFS) {
+        if (!G.missions.completed.includes(d.id)) return d.id;
       }
-      down += 1;
-      continue;
-    }
-    const d = dist(ped.x, ped.y, player.x, player.y);
-    if (d < KINGPIN.bodyguardRange && !player.inCar) {
-      ped.angle = Math.atan2(player.y - ped.y, player.x - ped.x);
-      ped.x += Math.cos(ped.angle) * KINGPIN.bodyguardSpeed * dt;
-      ped.y += Math.sin(ped.angle) * KINGPIN.bodyguardSpeed * dt;
-      if (d < 34 && player.invulnerable <= 0) {
-        damagePlayer(player, KINGPIN.bodyguardDamage);
-        showMessage(missions, 'A bodyguard is beating on you — punch back (Q)!', 2);
+      return null;
+    },
+
+    /** Can mission `id` be started right now? */
+    canStart(id) {
+      if (G.missions.current) return false;
+      if (G.missions.completed.includes(id)) return false;
+      return id <= G.missions.unlocked;
+    },
+
+    /** Start mission `id`. Returns the mission or null. */
+    startMission(id) {
+      if (!G.missions.canStart(id)) return null;
+      const m = createMission(id);
+      if (!m) return null;
+      m.startedAt = G.time ? G.time.t : 0;
+      G.missions.current = m;
+      G.missions.currentIndex = id - 1;
+      G.missions.attempts[id] = (G.missions.attempts[id] ?? 0) + 1;
+      G.missions._setup(id, m);
+      try {
+        G.story?.playLines?.(id, 'start');
+      } catch (e) { /* best-effort */ }
+      try {
+        G.hud?.banner?.(`${m.name} — ${defFor(id).brief}`, 5);
+      } catch (e) { /* best-effort */ }
+      emit(G, 'mission-started', { id, name: m.name });
+      sfx(G, 'mission-start');
+      return m;
+    },
+
+    /** Mark the current mission passed: reward, unlock, persist. */
+    passMission() {
+      const m = G.missions.current;
+      if (!m) return;
+      m.status = 'passed';
+      const reward = rewardFor(m.id);
+      if (G.player) G.player.money += reward;
+      if (!G.missions.completed.includes(m.id)) G.missions.completed.push(m.id);
+      G.missions.unlocked = Math.max(G.missions.unlocked, m.id + 1);
+      try {
+        G.story?.playLines?.(m.id, 'done');
+      } catch (e) { /* best-effort */ }
+      try {
+        G.hud?.banner?.(`Mission passed! +$${reward}`, 5);
+      } catch (e) { /* best-effort */ }
+      emit(G, 'mission-complete', { id: m.id, reward });
+      // The jingle plays in main.js on 'mission-complete'; do not play it
+      // here too, or it sounds twice.
+      G.missions._cleanup();
+      G.missions.current = null;
+      G.missions.currentIndex = m.id; // next mission index for the save
+      if (m.id === 8) {
+        emit(G, 'game-complete', { money: G.player?.money ?? 0 });
+        try {
+          G.hud?.showEnd?.(true);
+        } catch (e) { /* best-effort */ }
       }
-    }
-  }
-  missions.fightDown = down;
-}
+      persist(G);
+    },
 
-// --- Shared step machinery --------------------------------------------------
-// Advance to the next objective; when the chain runs out, the mission pays.
-function advance(missions, state, def, note) {
-  missions.step += 1;
-  if (missions.step >= def.steps.length) {
-    completeMission(missions, state, def);
-  } else if (note) {
-    showMessage(missions, note, 3);
-  }
-}
+    /** Mark the current mission failed with a reason. Retry stays open. */
+    failMission(reason) {
+      const m = G.missions.current;
+      if (!m) return;
+      m.status = 'failed';
+      m.failReason = reason;
+      try {
+        G.hud?.banner?.(`Mission failed: ${reason}`, 5);
+      } catch (e) { /* best-effort */ }
+      emit(G, 'mission-failed', { id: m.id, reason });
+      // The jingle plays in main.js on 'mission-failed'; do not play it
+      // here too, or it sounds twice.
+      G.missions._cleanup();
+      G.missions.current = null;
+      persist(G);
+    },
 
-function failJob(missions, def) {
-  missions.active = false;
-  missions.failed = true;
-  missions.failText = def.failText;
-}
+    /** Called when the player is wasted or busted mid-mission. */
+    onPlayerDown(kind) {
+      if (!G.missions.current) return;
+      G.missions.failMission(kind === 'busted' ? 'Busted by the police' : 'Wasted');
+    },
 
-// The alarm on a vault or a safe: it climbs the whole time Rico is inside
-// the job, and at two thresholds it calls the law in for real. The
-// kingpin's alarm only runs while the safe is being cracked — once the
-// ledger is taken the escape is hard enough without the alarm topping the
-// heat back up.
-function runAlarm(missions, state, dt, def) {
-  const heist = missions.heist;
-  const inside = (def.id === 5 && missions.step >= 1) || (def.id === 7 && missions.step === 2);
-  if (!inside) return;
-  heist.alarm = Math.min(100, heist.alarm + HEIST.alarmPerSecond * dt);
-  if (heist.alarm >= HEIST.alarmFirstStar && heist.alarmStars < 1) {
-    heist.alarmStars = 1;
-    addWanted(state, 1);
-    showMessage(missions, 'The alarm is screaming — the cops are coming!', 4);
-  } else if (heist.alarm >= HEIST.alarmSecondStar && heist.alarmStars < 2) {
-    heist.alarmStars = 2;
-    addWanted(state, 1);
-    showMessage(missions, 'Alarm maxed — the whole precinct is on its way!', 4);
-  }
-}
-
-// One handler per objective kind. Each gets the mission state, the shared
-// state, the step def and the frame, and returns nothing — it advances the
-// step itself when its condition is met.
-const STEP_HANDLERS = {
-  goto(missions, state, def, step) {
-    const pos = ricoPos(state);
-    if (dist(pos.x, pos.y, step.x, step.y) < step.radius && (!step.needCar || state.player.inCar)) {
-      advance(missions, state, def, 'Objective done — next stop marked.');
-    }
-  },
-
-  steal(missions, state, def, step, events) {
-    const wantModel = step.model || 'Sunset Coupe';
-    const ride = state.player.inCar;
-    if (ride && ride.model === wantModel) {
-      advance(missions, state, def, `Got the ${wantModel}. Now get it where it needs to go.`);
-    } else if (events && events.stolenCar && ride && ride.model !== wantModel) {
-      showMessage(missions, `Wrong car — the job needs a ${wantModel}.`, 3);
-    }
-  },
-
-  escape(missions, state, def) {
-    if (state.wanted === 0) {
-      advance(missions, state, def, 'Clean. Now meet Dante at the park.');
-    }
-  },
-
-  crack(missions, state, def, step, _events, dt) {
-    const pos = ricoPos(state);
-    const heist = missions.heist;
-    const crackSeconds = def.crackSeconds || HEIST.crackSeconds;
-    if (dist(pos.x, pos.y, step.x, step.y) < step.radius) {
-      // Channel inside the ring: the tumblers fall one tick at a time.
-      heist.crack = Math.min(1, heist.crack + dt / crackSeconds);
-      if (heist.crack >= 1) {
-        advance(missions, state, def, def.id === 7 ? 'Safe open! Take the ledger and run.' : 'Vault open! Grab the cash and run.');
+    /** Per-mission setup: waypoints, spawns, wanted levels. */
+    _setup(id, m) {
+      const P = PLACES;
+      if (id === 1) {
+        // A sedan waiting on the road by the Harbor for Rook to lift.
+        const car = G.vehicles.spawn({
+          x: 288, z: 144,
+          heading: Math.PI, kind: 'sedan', driver: 'none',
+        });
+        m.data.carId = car.id;
+        m.waypoint = { x: car.pos.x, z: car.pos.z };
+        m.objectives = ['Steal a car', "Drive it to Mara's garage"];
+      } else if (id === 2) {
+        m.data.drops = [
+          { x: 144, z: -144 },
+          { x: -144, z: 144 },
+          { x: -72, z: -216 },
+        ];
+        m.data.dropIndex = 0;
+        m.waypoint = { ...m.data.drops[0] };
+        m.objectives = ['Deliver the packages (0/3)', 'Beat the clock'];
+      } else if (id === 3) {
+        G.police?.addWanted?.(30, 'mission');
+        m.timer = 60;
+        m.timerMax = 60;
+        m.waypoint = null;
+        m.objectives = ['Survive the police for 60 seconds', 'Do not get busted'];
+      } else if (id === 4) {
+        m.waypoint = { ...P.pier9 };
+        m.objectives = ['Reach Pier 9', 'Clear the Kroll gunmen'];
+        m.data.spawned = false;
+      } else if (id === 5) {
+        const loop = [
+          { x: 144, z: 72 }, { x: 144, z: -72 }, { x: 72, z: -72 }, { x: 72, z: 72 },
+        ];
+        m.data.race = { checkpoints: loop, lap: 0, checkpoint: 0, laps: 3 };
+        m.waypoint = { ...loop[0] };
+        m.objectives = ['Win the midnight race (3 laps)', 'Hit every checkpoint'];
+        // Dante's driver: a rival car on the same loop, a touch slower.
+        const rival = G.vehicles.spawn({
+          x: 144, z: 90, heading: Math.PI, kind: 'coupe',
+          driver: 'rival', maxSpeed: 34, accel: 14,
+        });
+        m.data.rivalId = rival.id;
+        G.missions._raceRival = { vehicle: rival, checkpoint: 0, lap: 0, speed: 26 };
+      } else if (id === 6) {
+        m.waypoint = { ...P.garageRoad };
+        m.objectives = ['Pick up Mara at the garage'];
+        m.data.pickedUp = false;
+        m.data.ambushed = false;
+      } else if (id === 7) {
+        const truck = G.vehicles.spawn({
+          x: 288, z: -72,
+          heading: Math.PI / 2, kind: 'truck', driver: 'none',
+        });
+        m.data.truckId = truck.id;
+        m.waypoint = { x: truck.pos.x, z: truck.pos.z };
+        m.objectives = ['Steal the courier truck', 'Deliver it to the Hills warehouse'];
+      } else if (id === 8) {
+        const loop = [
+          { x: 72, z: 0 }, { x: 0, z: 72 }, { x: -72, z: 0 }, { x: 0, z: -72 },
+        ];
+        m.data.race = { checkpoints: loop, lap: 0, checkpoint: 0, laps: 1 };
+        m.waypoint = { ...loop[0] };
+        m.objectives = ['Beat Dante in the race', 'Then lose the cops'];
+        const dante = G.vehicles.spawn({
+          x: 72, z: 18, heading: Math.PI, kind: 'coupe',
+          driver: 'rival', maxSpeed: 36, accel: 15,
+        });
+        m.data.rivalId = dante.id;
+        G.missions._raceRival = { vehicle: dante, checkpoint: 0, lap: 0, speed: 28 };
       }
-    } else if (heist.crack > 0) {
-      // Step out and the progress slips away.
-      heist.crack = Math.max(0, heist.crack - dt / HEIST.crackDecaySeconds);
-    }
-  },
+      G.missions._syncMarker();
+    },
 
-  sneak(missions, state, def, step, _events, dt) {
-    const pos = ricoPos(state);
-    const sneak = missions.sneak;
-    if (dist(pos.x, pos.y, step.x, step.y) >= step.radius) {
-      // Outside the yard the lock pick slips and the heat cools.
-      if (sneak.progress > 0) sneak.progress = Math.max(0, sneak.progress - dt / CONTAINER.sneakDecaySeconds);
-      sneak.spot = Math.max(0, sneak.spot - CONTAINER.spotCooldownPerSecond * dt);
-      return;
-    }
-    sneak.progress = Math.min(1, sneak.progress + dt / (def.sneakSeconds || CONTAINER.sneakSeconds));
-    let nearestGuard = Infinity;
-    for (const guard of missions.guards) {
-      nearestGuard = Math.min(nearestGuard, dist(guard.x, guard.y, pos.x, pos.y));
-    }
-    if (nearestGuard < CONTAINER.guardSpotRange) {
-      sneak.spot = Math.min(100, sneak.spot + CONTAINER.spotPerSecond * dt);
-      if (sneak.spot >= 100) {
-        // Spotted: a star, and the meter drops back to half so Rico can recover.
-        sneak.spot = 40;
-        addWanted(state, 1);
-        showMessage(missions, 'Spotted by a harbor guard — the law is coming!', 4);
+    /** Tear down mission spawns (rival cars become parked cars). */
+    _cleanup() {
+      if (G.missions._raceRival?.vehicle) {
+        const rv = G.missions._raceRival.vehicle;
+        rv.driver = 'none';
+        rv.ai = null;
+        rv.speed = 0;
+        G.missions._raceRival = null;
       }
-    } else {
-      sneak.spot = Math.max(0, sneak.spot - CONTAINER.spotCooldownPerSecond * dt);
-    }
-    if (sneak.progress >= 1) {
-      advance(missions, state, def, 'Lock cracked — jack the hauler and go!');
-    }
-  },
+      if (G.missions._marker) G.missions._marker.visible = false;
+      if (G.missions.current) G.missions.current.waypoint = null;
+    },
 
-  fight(missions, state, def, _step, _events, dt) {
-    if (!missions.bodyguardsSpawned) fieldBodyguards(missions, state);
-    workBodyguards(missions, state, dt);
-    if (missions.fightDown >= (def.fightCount || KINGPIN.fightCount)) {
-      advance(missions, state, def, 'Crew down — crack the safe!');
-    }
-  },
-
-  grab(missions, state, def, step) {
-    const pos = ricoPos(state);
-    if (dist(pos.x, pos.y, step.x, step.y) < step.radius) {
-      missions.heist.grabAlarm = missions.heist.alarm;
-      if (def.id === 7) {
-        // The ledger is the kingpin's crown jewels: taking it puts Rico at
-        // five stars on the spot.
-        addWanted(state, 5);
-        advance(missions, state, def, 'Ledger taken — the whole precinct is coming for you!');
+    /** Move the 3D waypoint beam to the mission waypoint. */
+    _syncMarker() {
+      const m = G.missions.current;
+      if (!G.missions._marker) G.missions._marker = buildMarker(G);
+      const marker = G.missions._marker;
+      if (!marker) return;
+      if (m?.waypoint) {
+        marker.visible = true;
+        marker.position.x = m.waypoint.x;
+        marker.position.z = m.waypoint.z;
       } else {
-        advance(missions, state, def, 'Cash grabbed — now lose the heat!');
+        marker.visible = false;
+      }
+    },
+  };
+
+  return G.missions;
+}
+
+// ---------------------------------------------------------------- update
+
+function playerPos(G) {
+  const p = G.player;
+  if (!p) return null;
+  return p.inVehicle && p.vehicle ? p.vehicle.pos : p.pos;
+}
+
+function raceStep(G, m, dt) {
+  const race = m.data.race;
+  const pos = playerPos(G);
+  if (!race || !pos) return;
+  const cp = race.checkpoints[race.checkpoint];
+  if (cp && atWaypoint(pos, cp, 10)) {
+    const next = advanceCheckpoint(race, race.checkpoint);
+    m.data.race = next;
+    const total = race.checkpoints.length;
+    m.waypoint = { ...race.checkpoints[next.checkpoint] };
+    emit(G, 'checkpoint', { lap: next.lap + 1, checkpoint: next.checkpoint + 1, total });
+    sfx(G, 'checkpoint');
+    G.missions._syncMarker();
+  }
+  // Rival car follows the same checkpoints.
+  const rival = G.missions._raceRival;
+  if (rival?.vehicle) {
+    const rv = rival.vehicle;
+    const rcp = race.checkpoints[rival.checkpoint];
+    if (rcp) {
+      const dx = rcp.x - rv.pos.x;
+      const dz = rcp.z - rv.pos.z;
+      const d = Math.hypot(dx, dz);
+      const want = Math.atan2(dx, dz);
+      let dh = want - rv.heading;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      rv.ai = {
+        throttle: d > 4 ? 0.85 : 0.4,
+        steer: clamp(dh * 2.4, -1, 1),
+      };
+      rv.speed = Math.min(rv.speed, rival.speed);
+      if (d < 10) {
+        rival.checkpoint += 1;
+        if (rival.checkpoint >= race.checkpoints.length) {
+          rival.checkpoint = 0;
+          rival.lap += 1;
+        }
       }
     }
-  },
-};
-
-export function stepMissions(missions, state, dt, events) {
-  if (missions.messageTimer > 0) missions.messageTimer -= dt;
-  if (missions.introTimer > 0) missions.introTimer -= dt;
-  const def0 = MISSION_DEFS[missions.index];
-  // Mission extras live only while their job needs them: guards patrol
-  // the yard during the Container Heist sneak and steal, bodyguards hold
-  // the compound during the Kingpin Takedown fight, and both go home
-  // otherwise.
-  const yardJob = missions.active && def0 && def0.id === 6 && missions.step <= 2;
-  if (!yardJob) missions.guards = [];
-  const compoundJob = missions.active && def0 && def0.id === 7 && missions.step === 1;
-  if (!compoundJob) {
-    if (state.peds.some((p) => p.bodyguard)) state.peds = state.peds.filter((p) => !p.bodyguard);
-    missions.bodyguardsSpawned = false;
   }
-  if (!missions.active || missions.failed) return;
-  const def = MISSION_DEFS[missions.index];
-  if (missions.timer > 0) {
-    missions.timer -= dt;
-    if (missions.timer <= 0) {
-      failJob(missions, def);
-      return;
+}
+
+export function update(G, dt) {
+  const ms = G.missions;
+  if (!ms || G.state !== 'playing') return;
+  dt = Math.min(dt, 0.05);
+  // A loaded save may have completed missions the unlock counter never saw.
+  if (ms.completed) ms.unlocked = Math.max(ms.unlocked, ms.completed.length + 1);
+  const m = ms.current;
+  if (!m) return;
+  const pos = playerPos(G);
+  const P = PLACES;
+
+  // Timed missions tick down. Expiry fails the mission only for the
+  // deadline missions (2, 5); for mission 3 (survive) and mission 8
+  // stage 1 (escape) expiry is the PASS condition, handled in their case.
+  if (m.timerMax > 0) {
+    m.timer -= dt;
+    if (m.timer <= 0) {
+      m.timer = 0;
+      if (m.id === 2 || m.id === 5) {
+        ms.failMission('Time ran out');
+        return;
+      }
     }
   }
-  const step = currentStep(missions);
-  if (!step) return;
-  // Yard patrol runs under the sneak and steal steps.
-  if (def.id === 6 && missions.step <= 2) {
-    if (missions.guards.length === 0) fieldGuards(missions);
-    marchGuards(missions, dt);
-  }
-  runAlarm(missions, state, dt, def);
-  const handler = STEP_HANDLERS[step.kind];
-  if (handler) handler(missions, state, def, step, events, dt);
-  // The getaway car must survive mission 1.
-  if (def.id === 1 && state.player.inCar && state.player.inCar.health <= 0) {
-    failJob(missions, def);
-  }
-}
 
-export function completeMission(missions, state, def) {
-  missions.active = false;
-  missions.done = true;
-  missions.index += 1;
-  let reward = def.reward;
-  // Mission 5 pays a quiet bonus when the cash was grabbed before the
-  // alarm got loud — fast and quiet is worth more than fast and loud.
-  if (def.id === 5 && missions.heist.grabAlarm !== null && missions.heist.grabAlarm < HEIST.quietBonusAlarm) {
-    reward += HEIST.quietBonus;
-    showMessage(missions, `${def.title} complete! +$${reward} (includes $${HEIST.quietBonus} quiet-job bonus)`, 5);
-  } else if (def.id === 7 && missions.heist.grabAlarm !== null && missions.heist.grabAlarm < HEIST.quietBonusAlarm) {
-    // The finale pays a bigger quiet bonus — the ledger taken before the
-    // alarm got loud means the kingpin never saw it coming.
-    reward += HEIST.kingpinQuietBonus;
-    showMessage(missions, `${def.title} complete! +$${reward} (includes $${HEIST.kingpinQuietBonus} quiet-job bonus) — Rico owns Palmetto Bay.`, 6);
-  } else if (def.id === 7) {
-    showMessage(missions, `${def.title} complete! +$${reward} — Rico owns Palmetto Bay.`, 6);
-  } else if (def.id === 1 && state.player.inCar && state.player.inCar.health >= 80) {
-    reward += 100;
-    showMessage(missions, `${def.title} complete! +$${reward} (includes $100 clean-delivery bonus)`, 5);
-  } else {
-    showMessage(missions, `${def.title} complete! +$${reward}`, 5);
-  }
-  state.player.money += reward;
-}
-
-// --- Taxi side job ----------------------------------------------------------
-// A fare is a pickup and a drop-off: Rico has 30 seconds to reach the
-// passenger, then 90 seconds to deliver them. The fare pays a base amount
-// plus distance, so a cross-city run is worth more than a hop round the block.
-export function startTaxi(missions, state, random) {
-  const taxi = missions.taxi;
-  const pos = ricoPos(state);
-  // Pick a pickup stop that is not right on top of Rico, then a different drop-off.
-  const farStops = TAXI_STOPS.filter((s) => dist(s.x, s.y, pos.x, pos.y) > 300);
-  const pickup = farStops[Math.floor(random() * farStops.length)] || TAXI_STOPS[0];
-  let drop = TAXI_STOPS[Math.floor(random() * TAXI_STOPS.length)];
-  while (drop === pickup) drop = TAXI_STOPS[Math.floor(random() * TAXI_STOPS.length)];
-  taxi.active = true;
-  taxi.phase = 'pickup';
-  taxi.px = pickup.x;
-  taxi.py = pickup.y;
-  taxi.dx = drop.x;
-  taxi.dy = drop.y;
-  taxi.name = drop.name;
-  taxi.timer = 30;
-  taxi.fare = 0;
-  showMessage(missions, `Taxi fare: pick up the passenger at ${pickup.name}.`, 4);
-  return taxi;
-}
-
-export function taxiObjective(missions) {
-  const taxi = missions.taxi;
-  if (!taxi.active) return null;
-  if (taxi.phase === 'pickup') return { x: taxi.px, y: taxi.py, text: 'Pick up the taxi passenger' };
-  return { x: taxi.dx, y: taxi.dy, text: `Drop the passenger at ${taxi.name}` };
-}
-
-export function stepTaxi(missions, state, dt) {
-  const taxi = missions.taxi;
-  if (!taxi.active) return;
-  taxi.timer -= dt;
-  if (taxi.timer <= 0) {
-    taxi.active = false;
-    showMessage(missions, 'The passenger gave up waiting — fare lost.', 3);
-    return;
-  }
-  const pos = ricoPos(state);
-  if (taxi.phase === 'pickup') {
-    if (dist(pos.x, pos.y, taxi.px, taxi.py) < 90) {
-      taxi.phase = 'dropoff';
-      taxi.timer = 90;
-      const ride = dist(taxi.dx, taxi.dy, taxi.px, taxi.py);
-      taxi.fare = Math.round(60 + ride * 0.055);
-      showMessage(missions, `Passenger aboard — take them to ${taxi.name} ($${taxi.fare}).`, 4);
+  switch (m.id) {
+    case 1: {
+      if (m.stage === 0) {
+        if (G.player?.inVehicle) {
+          m.stage = 1;
+          m.waypoint = { ...P.garageRoad };
+          m.objectives = ["Drive it to Mara's garage"];
+          ms._syncMarker();
+        }
+      } else if (pos && atWaypoint(pos, P.garageRoad, 10) && G.player?.inVehicle) {
+        ms.passMission();
+      }
+      break;
     }
-  } else if (dist(pos.x, pos.y, taxi.dx, taxi.dy) < 110) {
-    taxi.active = false;
-    state.player.money += taxi.fare;
-    state.stats.taxis = (state.stats.taxis || 0) + 1;
-    showMessage(missions, `Fare complete! +$${taxi.fare}`, 4);
+    case 2: {
+      if (pos && m.data.drops) {
+        const drop = m.data.drops[m.data.dropIndex];
+        if (drop && atWaypoint(pos, drop, 9)) {
+          m.data.dropIndex += 1;
+          sfx(G, 'delivery');
+          emit(G, 'package-delivered', { count: m.data.dropIndex });
+          if (m.data.dropIndex >= m.data.drops.length) {
+            ms.passMission();
+          } else {
+            m.waypoint = { ...m.data.drops[m.data.dropIndex] };
+            m.objectives = [`Deliver the packages (${m.data.dropIndex}/3)`, 'Beat the clock'];
+            ms._syncMarker();
+          }
+        }
+      }
+      break;
+    }
+    case 3: {
+      // Survive: the timer is the mission. Getting busted/wasted fails via onPlayerDown.
+      if (m.timer <= 0) {
+        G.police?.clearWanted?.();
+        ms.passMission();
+      }
+      break;
+    }
+    case 4: {
+      if (m.stage === 0) {
+        if (pos && atWaypoint(pos, P.pier9, 25)) {
+          m.stage = 1;
+          m.objectives = ['Clear the Kroll gunmen'];
+          // Spawn the crew on the pier.
+          for (let i = 0; i < 6; i++) {
+            G.combat?.spawnEnemy?.({
+              x: P.pier9.x + (Math.sin(i * 2.4) * 8),
+              z: P.pier9.z + (Math.cos(i * 2.4) * 5),
+              kind: i === 0 ? 'bruiser' : 'gunman',
+            });
+          }
+          emit(G, 'ambush', { count: 6 });
+          sfx(G, 'ambush');
+          m.data.spawned = true;
+        }
+      } else if (m.data.spawned && (G.combat?.enemies?.length ?? 0) === 0) {
+        ms.passMission();
+      }
+      break;
+    }
+    case 5: {
+      raceStep(G, m, dt);
+      const race = m.data.race;
+      if (race && raceFinished(race, 3)) {
+        const rival = G.missions._raceRival;
+        const rivalDone = rival && rival.lap >= 3;
+        if (!rivalDone) ms.passMission();
+        else ms.failMission('Dante\'s driver finished first');
+      }
+      break;
+    }
+    case 6: {
+      if (m.stage === 0) {
+        if (pos && atWaypoint(pos, P.garageRoad, 10)) {
+          G.missions._maraTimer += dt;
+          if (G.missions._maraTimer > 1.5) {
+            m.stage = 1;
+            m.data.pickedUp = true;
+            m.waypoint = { ...P.harborDepot };
+            m.objectives = ['Take Mara to the port', 'Escape the ambush'];
+            try {
+              G.story?.playLines?.(6, 'pickup');
+            } catch (e) { /* best-effort */ }
+            ms._syncMarker();
+          }
+        } else {
+          G.missions._maraTimer = 0;
+        }
+      } else if (m.stage === 1) {
+        // Ambush halfway: wanted 3 + two cop cars.
+        if (!m.data.ambushed && pos && dist2D(pos, P.harborDepot) < 90) {
+          m.data.ambushed = true;
+          G.police?.addWanted?.(55, 'mission');
+          G.police?.spawnCop?.();
+          G.police?.spawnCop?.();
+          emit(G, 'ambush', { count: 2 });
+          sfx(G, 'ambush');
+        }
+        if (pos && atWaypoint(pos, P.harborDepot, 10)) {
+          G.police?.clearWanted?.();
+          ms.passMission();
+        }
+      }
+      break;
+    }
+    case 7: {
+      if (m.stage === 0) {
+        const truck = (G.vehicles?.list ?? []).find((v) => v.id === m.data.truckId);
+        if (truck && G.player?.vehicle === truck) {
+          m.stage = 1;
+          m.waypoint = { ...P.hillsWarehouse };
+          m.objectives = ['Deliver the truck to the Hills warehouse', '4 stars on your tail'];
+          G.police?.addWanted?.(75, 'mission');
+          ms._syncMarker();
+        }
+      } else if (pos && atWaypoint(pos, P.hillsWarehouse, 11)) {
+        if (G.player?.vehicle?.kind === 'truck') {
+          G.police?.clearWanted?.();
+          ms.passMission();
+        }
+      }
+      break;
+    }
+    case 8: {
+      if (m.stage === 0) {
+        raceStep(G, m, dt);
+        const race = m.data.race;
+        if (race && raceFinished(race, 1)) {
+          const rival = G.missions._raceRival;
+          if (rival && rival.lap >= 1) {
+            ms.failMission('Dante won the race');
+          } else {
+            m.stage = 1;
+            m.timer = 30;
+            m.timerMax = 30;
+            m.waypoint = null;
+            m.objectives = ['Lose the cops — 30 seconds'];
+            G.police?.addWanted?.(55, 'mission');
+            try {
+              G.story?.playLines?.(8, 'raceDone');
+            } catch (e) { /* best-effort */ }
+            ms._syncMarker();
+          }
+        }
+      } else if (m.stage === 1) {
+        if (m.timer <= 0.01) {
+          G.police?.clearWanted?.();
+          m.stage = 2;
+          m.waypoint = { ...P.meridianTower };
+          m.objectives = ['Face Dante on the tower roof'];
+          // Dante + two gunmen at the tower base (outside the tower AABB).
+          G.combat?.spawnEnemy?.({ x: P.meridianTower.x + 24, z: P.meridianTower.z, kind: 'boss' });
+          G.combat?.spawnEnemy?.({ x: P.meridianTower.x - 24, z: P.meridianTower.z + 16, kind: 'gunman' });
+          G.combat?.spawnEnemy?.({ x: P.meridianTower.x - 24, z: P.meridianTower.z - 16, kind: 'gunman' });
+          ms._syncMarker();
+        }
+      } else if (m.stage === 2) {
+        if (pos && atWaypoint(pos, P.meridianTower, 22)
+          && (G.combat?.enemies?.length ?? 0) === 0) {
+          ms.passMission();
+        }
+      }
+      break;
+    }
+    default:
+      break;
   }
 }

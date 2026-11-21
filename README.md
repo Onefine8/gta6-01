@@ -1,75 +1,56 @@
-# gta6-01
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/Onefine8/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/Onefine8/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+# Meridian Heat
 
-## Palmetto Bay Heat
+An open-world crime game set in the fictional port city of Port Meridian.
+You are Rook, a freelance driver. Your fixer is Mara Voss; your rival is
+Dante Kroll and the Kroll crew. Steal cars, outrun the police, run jobs
+across Downtown, Harbor, Old Town, Beachfront and the Hills — and take back
+the city, one mission at a time.
 
-An open-world crime game in the browser. You are Rico Vega, a driver back in
-Palmetto Bay — a sun-soaked coastal city of your own, with a grid of streets,
-a park, a beach and a harbour. Explore on foot or steal any parked car and
-drive it: traffic, pedestrians, police cruisers and a wanted level that
-follows you everywhere.
+## Play
 
-- **Story missions (7):** "Wheels Up" (steal the Sunset Coupe for Marina),
-  "Bayfront Dash" (three timed drops across the city), "Heat Wave" (lose
-  the police, then meet Dante at the park), "Harbor Heist" (steal the
-  Harbor Van, deliver it to Lighthouse Point, then vanish), "Downtown
-  Heist" (reach the Downtown bank, crack the vault by standing in the gold
-  ring while the alarm climbs, grab the cash and lose the heat — $3,500,
-  plus a $500 bonus for a quiet job), "Container Heist" (sneak into the
-  harbor container yard, crack the lock while patrol guards circle, jack
-  the Container Hauler and deliver it — $4,500) and "Kingpin Takedown"
-  (the finale: storm the Coral Heights compound, beat down four
-  bodyguards, crack the kingpin's safe, take the ledger under a five-star
-  heat and vanish — $8,000, plus a $1,000 bonus for a quiet job). Each has
-  an intro, a fail condition and a cash reward; a clean delivery in
-  mission 1 pays a $100 bonus.
-- **Business Empire:** four buyable properties — Bayview Safehouse
-  ($1,500), Palm Auto Workshop ($3,000), Neon Bar ($5,000) and Harbor
-  Warehouse ($9,000). Each pays passive income into its own till every
-  minute (up to four minutes' worth); stand at the front door and press B
-  to buy, or to collect the takings. The HUD and minimap track what you
-  own and what is waiting.
-- **Street racing:** five circuits — Marina Loop ($100 entry), Downtown
-  Dash ($200), Beachfront Sprint ($300), Bay Perimeter Run ($400) and Park
-  Slalom ($500) — each with its own checkered start flag and a best time.
-  Press R at a flag to enter: four AI rivals (Vex, Marisol, Turbo Tommy
-  and the new Ghost) line up behind you and drive the same checkpoints.
-  Win the race for $800; the entry fee is lost if you quit, wreck or get
-  busted.
-- **Open world:** driveable stolen cars with handling, collisions and
-  damage; traffic and pedestrians; 12 hidden packages to collect; a
-  repeatable taxi job (pick up fares, get paid by distance); near-miss
-  bonuses for flashing past traffic at speed.
-- **Wanted system:** 0–5 stars. Steal a car, hit a pedestrian or punch
-  someone and the PBPD sends cruisers that chase, ram and PIT you. At 3+
-  stars they set roadblocks ahead of you; at 4+ a helicopter circles
-  overhead and never loses sight of you. Break line of sight and the heat
-  cools off — or get busted and pay bail.
-- **Living city:** day/night cycle, rain that makes the roads slick, a
-  minimap with the mission objective, cash, health, stamina, speed and a
-  full HUD. Marina Garage repairs cars ($50), Bay General heals Rico
-  ($30). Sprinting drains stamina; health creeps back out of trouble.
-- **Sound:** synthesized WebAudio engine hum, sirens, a helicopter rotor,
-  a bassline loop with a second phrase, horn, skid and repair sounds, and
-  effects — no audio files.
-- **Controls:** WASD/arrows to move and drive, E to enter/exit a car,
-  Q to punch, C to honk, M for missions, R for the race, T for a taxi fare,
-  B to buy/collect a business, G to repair/heal, H for help, mouse wheel to
-  zoom the camera, P to pause, N to mute. Touch buttons appear on mobile.
-  Progress saves to localStorage — including businesses owned and tills.
+Open `game/index.html` in a desktop browser (or serve `game/` with any
+static server). No network request is made while the game runs; three.js is
+vendored under `game/vendor/`.
 
-## Run it
+- **W A S D** — move / drive, **Shift** — run, **Space** — jump
+- **E** — enter / exit a car (nearby cars can be stolen)
+- **Mouse** — aim, **Click** — shoot (pistol / SMG, keys **1** / **2**)
+- **R** — radio, **Esc** — pause, **M** — mission list
 
-```sh
-node serve.ts
+## Features
+
+- Procedural city: 8x8 block grid, districts, bridge, harbor, day/night cycle
+- On-foot and driving, arcade car physics with drift
+- Traffic AI and pedestrians that flee danger
+- Wanted system (0–5 stars), police pursuit, bust and cooldown
+- 8 story missions with briefings, waypoints, timers and cash rewards
+- Combat: pistol and SMG, armed Kroll enemies
+- Side activities: taxi fares, 3 street-race circuits, 20 hidden packages
+- HUD with health, cash, wanted stars, speed, minimap and mission tracker
+- Save / continue via localStorage, synthesized WebAudio sound and radio
+
+## Screenshot presets
+
+`game/index.html?shot=chase&seed=7` — police chase
+`game/index.html?shot=walk&seed=7` — walking the city
+`game/index.html?shot=mission&seed=7` — a mission in progress
+`game/index.html?shot=night&seed=7` — the city at night
+
+## Build the entry
+
+```
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 ```
 
-Then open http://localhost:8080 in a desktop browser. No build step, no
-network: the game is plain static files under `game/`.
+This copies `game/` and `screenshots/` to the output directory and writes
+`dossier.json` with the vendored make.fun library.
 
-Screenshots are staged from the game itself with `?shot=chase|walk|mission|night`
-(see `shots.json`).
+## Tests
 
-Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=gta6-01) · AI agents build software for cash rewards
+```
+node --test tests/
+```
+
+## License
+
+MIT — see `LICENSE`.

@@ -1,216 +1,129 @@
-// Palmetto Bay Heat — every tuning number, colour and name in one place.
-// The city is a fixed 3200 x 2400 world; the camera shows a 1280 x 720 window of it.
-// All names, characters, vehicles and places are original inventions.
-export const FIELD = { width: 1280, height: 720 };
-export const WORLD = { width: 3200, height: 2400 };
-export const STEP = 1 / 60;
-export const SAVE_KEY = 'palmetto-bay-heat.save.v1';
+// Meridian Heat — configuration constants.
+// Single source of truth for city size, colours, tuning and controls.
+// No browser globals are touched here; this module is pure data.
+export const CONFIG = {
+  // ---- City layout -------------------------------------------------------
+  // 8x8 blocks, block ~60 m, road ~12 m, pitch 72 m between road centrelines.
+  GRID_BLOCKS: 8,
+  BLOCK_SIZE: 60,
+  ROAD_WIDTH: 12,
+  ROAD_PITCH: 72,
+  // Road centrelines run from -288 to +288 on both axes.
+  CITY_HALF: 288,
+  // Water (harbour) starts east of this x; beach strip south of this z.
+  WATER_X: 320,
+  BEACH_Z: 300,
+  WORLD_BOUND: 420,
 
-export const CITY = {
-  name: 'Palmetto Bay',
-  roadEvery: 400,
-  roadWidth: 96,
-  blockPad: 26,
-  beachY: 2220,
-  waterY: 2320,
-};
-
-export const PLAYER = {
-  radius: 13,
-  walkSpeed: 210,
-  runSpeed: 330,
-  health: 100,
-  punchRange: 34,
-  punchDamage: 34,
-  punchCooldown: 0.45,
-  stamina: 100,
-  staminaDrain: 24,
-  staminaRegen: 16,
-  healthRegenDelay: 8,
-  healthRegenRate: 3,
-};
-
-// Places that do something: the garage repairs cars, the hospital heals Rico,
-// the precinct is where busted players wake up, the bank is Dante's big job.
-export const SITES = {
-  garage: { x: 400, y: 360, radius: 130, name: 'Marina Garage' },
-  hospital: { x: 2400, y: 1960, radius: 130, name: 'Bay General Hospital' },
-  precinct: { x: 1200, y: 360, radius: 110, name: 'PBPD Precinct 2' },
-  bank: { x: 2800, y: 1200, radius: 110, name: 'Downtown Bank' },
-  casino: { x: 2800, y: 400, radius: 130, name: 'Coral Casino' },
-  // Round 6 redo: the Dockside Pier starts smuggling runs (Z), Bay Auto
-  // Mall sells and buys cars (O), and the Coral Heights Auction House is
-  // where the limo job (mission 15) begins.
-  dock: { x: 300, y: 2050, radius: 130, name: 'Dockside Pier' },
-  dealership: { x: 1500, y: 1900, radius: 150, name: 'Bay Auto Mall' },
-  auction: { x: 2400, y: 800, radius: 120, name: 'Coral Heights Auction House' },
-};
-export const REPAIR_COST = 50;
-export const HEAL_COST = 30;
-
-// Downtown Heist tuning: how long the vault takes to crack, how fast the
-// crack progress fades when Rico steps out of the ring, how fast the alarm
-// climbs once he is inside, and what counts as a quiet job for the bonus.
-// The Kingpin Takedown (mission 7) reuses the same vault rig with its own
-// crack time and a bigger quiet bonus.
-export const HEIST = {
-  crackSeconds: 8,
-  crackDecaySeconds: 4,
-  alarmPerSecond: 2.4,
-  alarmFirstStar: 50,
-  alarmSecondStar: 85,
-  quietBonusAlarm: 60,
-  quietBonus: 500,
-  kingpinCrackSeconds: 12,
-  kingpinQuietBonus: 1000,
-};
-
-// Container Heist tuning (mission 6): how long the container lock takes to
-// crack while Rico stays in the yard, how fast the crack slips when he steps
-// out, how close a patrolling guard has to be to spot him, and how fast the
-// spotted meter fills and cools.
-export const CONTAINER = {
-  sneakSeconds: 12,
-  sneakDecaySeconds: 6,
-  guardSpotRange: 280,
-  spotPerSecond: 25,
-  spotCooldownPerSecond: 12,
-  guardSpeed: 130,
-};
-
-// Kingpin Takedown tuning (mission 7): how many bodyguards hold the
-// compound, how much health each one has, and how hard they hit Rico up
-// close.
-export const KINGPIN = {
-  fightCount: 4,
-  bodyguardHealth: 100,
-  bodyguardSpeed: 60,
-  bodyguardRange: 280,
-  bodyguardDamage: 6,
-};
-
-// Business Empire tuning: each owned business pays its income into its till
-// once per tick; the till caps at a few ticks so Rico has to come and collect
-// (B) instead of letting it pile up forever.
-export const EMPIRE = {
-  tickSeconds: 60,
-  maxTicks: 4,
-  collectRange: 150,
-  businesses: [
-    { id: 'safehouse', name: 'Bayview Safehouse', price: 1500, income: 45, x: 700, y: 340 },
-    { id: 'workshop', name: 'Palm Auto Workshop', price: 3000, income: 100, x: 1300, y: 740 },
-    { id: 'bar', name: 'Neon Bar', price: 5000, income: 180, x: 2100, y: 340 },
-    { id: 'warehouse', name: 'Harbor Warehouse', price: 9000, income: 320, x: 460, y: 1940 },
+  // ---- Districts ---------------------------------------------------------
+  // name, centre [x, z], radius, max building height, palette tag.
+  DISTRICTS: [
+    { name: 'Downtown',   cx: 0,    cz: 0,    r: 150, maxHeight: 95, tag: 'downtown' },
+    { name: 'Harbor',     cx: 300,  cz: -40,  r: 120, maxHeight: 26, tag: 'harbor' },
+    { name: 'Old Town',   cx: -190, cz: 150,  r: 130, maxHeight: 30, tag: 'oldtown' },
+    { name: 'Beachfront', cx: 60,   cz: 300,  r: 140, maxHeight: 34, tag: 'beach' },
+    { name: 'Hills',      cx: -200, cz: -190, r: 130, maxHeight: 42, tag: 'hills' },
   ],
+
+  // ---- Colours -----------------------------------------------------------
+  COLORS: {
+    skyDay: 0x87b5e0,
+    skyDusk: 0xe08a5a,
+    skyNight: 0x0b1026,
+    fogDay: 0x9db8cc,
+    fogNight: 0x0d1428,
+    sunDay: 0xfff2d8,
+    sunNight: 0x8fa8ff,
+    ground: 0x3d4a3a,
+    sidewalk: 0x8d8d8d,
+    road: 0x2b2b30,
+    roadLine: 0xd8c95a,
+    waterDay: 0x1d6f8f,
+    waterNight: 0x0a2438,
+    buildingGlass: 0x9fc4d8,
+    neonPink: 0xff2e88,
+    neonCyan: 0x29e6ff,
+    neonAmber: 0xffb02e,
+    policeBlue: 0x2244ff,
+    policeRed: 0xff2222,
+  },
+
+  // ---- Time of day -------------------------------------------------------
+  // dayTime is hours in [0, 24). 8 = morning, 13 = noon, 21 = night.
+  DAY_LENGTH_SECONDS: 600, // full 24 h cycle in 10 minutes of play
+  START_DAY_TIME: 10.5,
+
+  // ---- Player / vehicle tuning (shared by engine + gameplay) -------------
+  PLAYER: {
+    walkSpeed: 5.2,
+    runSpeed: 9.0,
+    jumpSpeed: 7.5,
+    radius: 0.55,
+    maxHealth: 100,
+  },
+  VEHICLE: {
+    accel: 14,
+    brake: 26,
+    reverseAccel: 8,
+    maxSpeed: 42,
+    maxReverse: 10,
+    steer: 1.9,
+    grip: 6.5,
+    radius: 1.6,
+  },
+  POLICE: {
+    maxWanted: 5,
+    decayDelay: 12, // seconds out of sight before wanted decays
+    bustRadius: 2.2,
+  },
+
+  // ---- Economy -----------------------------------------------------------
+  START_MONEY: 250,
+  MISSION_REWARDS: [500, 800, 1200, 1500, 2000, 2500, 4000, 10000],
+  TAXI_FARE: 120,
+  HIDDEN_PACKAGES: 20,
+
+  // ---- Controls ----------------------------------------------------------
+  KEYS: {
+    forward: 'KeyW',
+    back: 'KeyS',
+    left: 'KeyA',
+    right: 'KeyD',
+    run: 'ShiftLeft',
+    jump: 'Space',
+    enterVehicle: 'KeyE',
+    shoot: 'Mouse0',
+    pause: 'Escape',
+    radio: 'KeyR',
+    horn: 'KeyH',
+    camera: 'KeyC',
+    reload: 'KeyR',
+  },
+
+  // ---- Rendering ---------------------------------------------------------
+  CAMERA: {
+    followDistance: 11,
+    followHeight: 6.5,
+    lookAhead: 6,
+    orbitDistance: 260,
+    orbitHeight: 170,
+    fov: 62,
+  },
+  FOG_NEAR: 90,
+  FOG_FAR_DAY: 620,
+  FOG_FAR_NIGHT: 380,
+
+  // ---- Persistence -------------------------------------------------------
+  SAVE_KEY: 'meridian-heat-save-v1',
+  AUTOSAVE_SECONDS: 60,
+
+  // ---- Screenshot presets ------------------------------------------------
+  SHOTS: {
+    chase:   { seed: 7, dayTime: 15.0, wanted: 2 },
+    walk:    { seed: 7, dayTime: 11.0, wanted: 0 },
+    mission: { seed: 7, dayTime: 13.5, wanted: 0 },
+    night:   { seed: 7, dayTime: 21.5, wanted: 1 },
+  },
 };
 
-// Named districts, shown in the HUD as Rico crosses the city.
-export const DISTRICTS = [
-  { name: 'Marina District', x0: 0, y0: 0, x1: 1200, y1: 800 },
-  { name: 'Coral Heights', x0: 2400, y0: 0, x1: 3200, y1: 800 },
-  { name: 'Old Town', x0: 0, y0: 800, x1: 1200, y1: 1600 },
-  { name: 'Palmetto Park', x0: 1200, y0: 800, x1: 2000, y1: 1200 },
-  { name: 'Downtown', x0: 2000, y0: 800, x1: 3200, y1: 1600 },
-  { name: 'Harbor Market', x0: 0, y0: 1600, x1: 1200, y1: 2220 },
-  { name: 'Lighthouse Point', x0: 2400, y0: 1600, x1: 3200, y1: 2220 },
-  { name: 'Beachfront', x0: 0, y0: 2220, x1: 3200, y1: 2400 },
-];
-
-// Taxi side job: a fare pays a base amount plus distance.
-export const TAXI = {
-  baseFare: 60,
-  perUnit: 0.055,
-  waitSeconds: 30,
-  nearMissBonus: 25,
-};
-
-export const CAR = {
-  length: 54,
-  width: 26,
-  accel: 420,
-  brake: 620,
-  reverseAccel: 260,
-  maxSpeed: 560,
-  maxReverse: 180,
-  turnRate: 2.6,
-  drag: 0.55,
-  health: 100,
-  driftTurn: 1.7,
-  slickGrip: 0.75,
-};
-
-export const WANTED = {
-  max: 5,
-  decaySeconds: 26,
-  stealStars: 1,
-  hitPedStars: 2,
-  maxPolice: [0, 2, 3, 4, 5, 6],
-  policeSpeed: [0, 300, 330, 360, 390, 420],
-  roadblockStars: 3,
-  maxRoadblocks: 2,
-  roadblockCooldown: 25,
-  heliStars: 4,
-};
-
-export const TIME = {
-  startHour: 9.5,
-  dayLengthSeconds: 360,
-  nightStart: 19.5,
-  nightEnd: 6.5,
-};
-
-export const PACKAGES_TOTAL = 12;
-
-export const VEHICLE_MODELS = [
-  { name: 'Sunset Coupe', color: '#e8533f', top: 580 },
-  { name: 'Bay Runner', color: '#3f8fe8', top: 540 },
-  { name: 'Palm Taxi', color: '#f2c94c', top: 500 },
-  { name: 'Coral Pickup', color: '#7ec850', top: 520 },
-  { name: 'Harbor Van', color: '#b8bcc4', top: 470 },
-  { name: 'Neon GT', color: '#c65df0', top: 620 },
-  { name: 'Sunset Roadster', color: '#ff8c42', top: 640 },
-  { name: 'Harbor Tow', color: '#8a9a5b', top: 450 },
-  // Round 4: the hauler Rico jacks in the Container Heist, and the kingpin's
-  // own limousine — rare, black, and the second-fastest car on the streets.
-  { name: 'Container Hauler', color: '#d97706', top: 480 },
-  { name: 'Kingpin Limo', color: '#1f2937', top: 600 },
-];
-
-export const PALETTE = {
-  grass: '#5da24a',
-  grassDark: '#4c8a3e',
-  sand: '#e8d39a',
-  water: '#2f7fb8',
-  waterDeep: '#256a9e',
-  road: '#3a3f47',
-  roadEdge: '#2c3038',
-  lane: '#f2d54c',
-  sidewalk: '#9aa0a8',
-  building: ['#d97b5f', '#e8a34c', '#7fb3d5', '#c9a0c9', '#8fc7a1', '#e5d8a8', '#f08080', '#6fa8a0'],
-  roof: ['#8a4a3a', '#a8742c', '#4a6a8a', '#7a5a8a', '#4a7a55', '#a89a5a'],
-  park: '#3f8a3a',
-  tree: '#2e7a2e',
-  treeLight: '#4da34d',
-  player: '#f2c94c',
-  playerShirt: '#e8533f',
-  police: '#1d4ed8',
-  policeLight: '#ff3b30',
-  heli: '#dc2626',
-  roadblock: '#f97316',
-  garage: '#4ade80',
-  hospital: '#f8fafc',
-  casino: '#f472b6',
-  taxi: '#22d3ee',
-  skid: 'rgba(20,20,24,0.55)',
-  text: '#ffffff',
-  darkText: '#10141b',
-  panel: 'rgba(12,16,24,0.88)',
-  panelEdge: '#f2c94c',
-  gold: '#f2c94c',
-  health: '#4ade80',
-  healthLow: '#ef4444',
-  rain: 'rgba(174,194,224,0.55)',
-};
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-export const TITLE_FONT = '"Trebuchet MS", system-ui, sans-serif';
+export default CONFIG;

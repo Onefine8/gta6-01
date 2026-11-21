@@ -1,153 +1,165 @@
-// Keyboard, mouse and touch input. Held keys give a movement vector, a throttle
-// and a steering value; one-shot presses (enter car, punch, mission, pause, mute)
-// are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
-export const ACTION_ENTER = 1;
-export const ACTION_PUNCH = 2;
-export const ACTION_MISSION = 4;
-export const ACTION_PAUSE = 8;
-export const ACTION_CONFIRM = 16;
-export const ACTION_MUTE = 32;
-export const ACTION_RACE = 64;
-export const ACTION_HORN = 128;
-export const ACTION_HELP = 256;
-export const ACTION_REPAIR = 512;
-export const ACTION_TAXI = 1024;
-export const ACTION_BUSINESS = 2048;
-export const ACTION_TUNE = 4096;
-export const ACTION_CASINO_SLOTS = 8192;
-export const ACTION_CASINO_BLACKJACK = 16384;
-export const ACTION_CASINO_ROULETTE = 32768;
-export const ACTION_SMUGGLING = 65536;
-export const ACTION_DEALERSHIP = 131072;
+// Meridian Heat — keyboard + mouse input.
+// Tracks held keys, edge-triggered presses, and mouse-drag look deltas.
+// Only imports config.js; exposes everything through G.input.
+import { CONFIG } from './config.js';
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const ENTER = new Set(['KeyE', 'KeyF']);
-const PUNCH = new Set(['KeyQ', 'KeyX']);
-const MISSION = new Set(['KeyM']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const MUTE = new Set(['KeyN']);
-const RACE = new Set(['KeyR']);
-const RUN = new Set(['ShiftLeft', 'ShiftRight']);
-const HELP = new Set(['KeyH']);
-const REPAIR = new Set(['KeyG']);
-const TAXI = new Set(['KeyT']);
-const BUSINESS = new Set(['KeyB']);
-const TUNE = new Set(['KeyU']);
-const CASINO_SLOTS = new Set(['KeyV']);
-const CASINO_BLACKJACK = new Set(['KeyJ']);
-const CASINO_ROULETTE = new Set(['KeyK']);
-const SMUGGLING = new Set(['KeyZ']);
-const DEALERSHIP = new Set(['KeyO']);
-const HORN = new Set(['KeyC']);
+const cfg = CONFIG;
 
-export function createInput(target) {
-  const keys = new Set();
-  let actions = 0;
-  let zoomLevel = 0;
-  const touch = { up: false, down: false, left: false, right: false, run: false };
+export function init(G) {
+  const held = new Set();
+  const pressed = new Set(); // edge: cleared each frame by update()
+  let lookDx = 0;
+  let lookDy = 0;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  let mouseDown = false;
+  let anyGesture = false;
+  // Gamepad state, polled every frame in update().
+  let padAxis = { x: 0, y: 0 };
+  let padPrevButtons = [];
 
-  function press(code) {
-    if (ENTER.has(code)) actions |= ACTION_ENTER;
-    else if (PUNCH.has(code)) actions |= ACTION_PUNCH;
-    else if (MISSION.has(code)) actions |= ACTION_MISSION;
-    else if (PAUSE.has(code)) actions |= ACTION_PAUSE;
-    else if (CONFIRM.has(code)) actions |= ACTION_CONFIRM;
-    else if (MUTE.has(code)) actions |= ACTION_MUTE;
-    else if (RACE.has(code)) actions |= ACTION_RACE;
-    else if (HELP.has(code)) actions |= ACTION_HELP;
-    else if (REPAIR.has(code)) actions |= ACTION_REPAIR;
-    else if (TAXI.has(code)) actions |= ACTION_TAXI;
-    else if (BUSINESS.has(code)) actions |= ACTION_BUSINESS;
-    else if (TUNE.has(code)) actions |= ACTION_TUNE;
-    else if (CASINO_SLOTS.has(code)) actions |= ACTION_CASINO_SLOTS;
-    else if (CASINO_BLACKJACK.has(code)) actions |= ACTION_CASINO_BLACKJACK;
-    else if (CASINO_ROULETTE.has(code)) actions |= ACTION_CASINO_ROULETTE;
-    else if (SMUGGLING.has(code)) actions |= ACTION_SMUGGLING;
-    else if (DEALERSHIP.has(code)) actions |= ACTION_DEALERSHIP;
-  }
-
-  window.addEventListener('keydown', (event) => {
-    if (event.repeat) return;
-    keys.add(event.code);
-    if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)
-      || ENTER.has(event.code) || PUNCH.has(event.code) || MISSION.has(event.code)
-      || PAUSE.has(event.code) || CONFIRM.has(event.code) || MUTE.has(event.code)
-      || RACE.has(event.code) || RUN.has(event.code) || HELP.has(event.code)
-      || REPAIR.has(event.code) || TAXI.has(event.code) || BUSINESS.has(event.code) || HORN.has(event.code)
-      || TUNE.has(event.code) || CASINO_SLOTS.has(event.code)
-      || CASINO_BLACKJACK.has(event.code) || CASINO_ROULETTE.has(event.code)
-      || SMUGGLING.has(event.code) || DEALERSHIP.has(event.code)) {
-      event.preventDefault();
+  function pollGamepad() {
+    if (!navigator.getGamepads) return;
+    const pads = navigator.getGamepads();
+    const pad = pads && pads[0];
+    if (!pad || !pad.connected) {
+      padAxis = { x: 0, y: 0 };
+      padPrevButtons = [];
+      return;
     }
-    press(event.code);
-  });
-  window.addEventListener('keyup', (event) => keys.delete(event.code));
-  window.addEventListener('blur', () => keys.clear());
-  target.addEventListener('pointerdown', () => { actions |= ACTION_CONFIRM; });
-  // Mouse wheel zooms the camera in and out (three steps); the game never
-  // scrolls the page, so the wheel is free for the camera.
-  target.addEventListener('wheel', (event) => {
-    event.preventDefault();
-    zoomLevel = Math.max(0, Math.min(2, zoomLevel + (event.deltaY < 0 ? 1 : -1)));
-  }, { passive: false });
-
-  // On-screen touch buttons (shown on coarse pointers): data-touch names the key.
-  for (const btn of document.querySelectorAll('[data-touch]')) {
-    const name = btn.getAttribute('data-touch');
-    const on = (e) => {
-      e.preventDefault();
-      touch[name] = true;
-      if (name === 'enter') actions |= ACTION_ENTER;
-      if (name === 'punch') actions |= ACTION_PUNCH;
-      if (name === 'race') actions |= ACTION_RACE;
-      if (name === 'mission') actions |= ACTION_MISSION;
-      if (name === 'repair') actions |= ACTION_REPAIR;
-      if (name === 'business') actions |= ACTION_BUSINESS;
-      if (name === 'help') actions |= ACTION_HELP;
-    };
-    const off = (e) => { e.preventDefault(); touch[name] = false; };
-    btn.addEventListener('pointerdown', on);
-    btn.addEventListener('pointerup', off);
-    btn.addEventListener('pointerleave', off);
-    btn.addEventListener('pointercancel', off);
+    const dead = (v) => (Math.abs(v) < 0.18 ? 0 : v);
+    padAxis = { x: dead(pad.axes[0] || 0), y: -dead(pad.axes[1] || 0) };
+    // Buttons: 0 jump, 2 enter vehicle, 7 shoot, 9 pause (edge-triggered).
+    const map = [[0, cfg.KEYS.jump], [2, cfg.KEYS.enterVehicle], [7, 'Mouse0'], [9, cfg.KEYS.pause]];
+    for (const [idx, code] of map) {
+      const down = !!(pad.buttons[idx] && pad.buttons[idx].pressed);
+      const was = !!padPrevButtons[idx];
+      if (down && !was) pressed.add(code);
+      if (down) held.add(code);
+      else held.delete(code);
+    }
+    padPrevButtons = Array.from(pad.buttons, (b) => b.pressed);
+    if (padAxis.x !== 0 || padAxis.y !== 0) markGesture();
   }
 
-  const has = (set) => {
-    for (const code of set) if (keys.has(code)) return true;
-    return false;
-  };
+  function markGesture() {
+    if (!anyGesture) {
+      anyGesture = true;
+      if (G.events) G.events.emit('first-gesture');
+    }
+  }
 
-  return {
-    moveX() {
-      const r = (has(RIGHT) || touch.right ? 1 : 0) - (has(LEFT) || touch.left ? 1 : 0);
-      return r;
+  function onKeyDown(e) {
+    if (e.repeat) return;
+    held.add(e.code);
+    pressed.add(e.code);
+    markGesture();
+    // Don't let Space / arrows scroll the page while playing.
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+      e.preventDefault();
+    }
+  }
+
+  function onKeyUp(e) {
+    held.delete(e.code);
+  }
+
+  function onMouseDown(e) {
+    mouseDown = true;
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    if (e.button === 0) pressed.add('Mouse0');
+    markGesture();
+  }
+
+  function onMouseUp(e) {
+    mouseDown = false;
+    dragging = false;
+    if (e.button === 0) held.delete('Mouse0');
+  }
+
+  function onMouseMove(e) {
+    if (!dragging) return;
+    lookDx += e.clientX - lastX;
+    lookDy += e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+  }
+
+  function onBlur() {
+    held.clear();
+    dragging = false;
+    mouseDown = false;
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mouseup', onMouseUp);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('blur', onBlur);
+
+  G.input = {
+    held,
+    pressed,
+    isDown(code) {
+      return held.has(code);
     },
-    moveY() {
-      return (has(DOWN) || touch.down ? 1 : 0) - (has(UP) || touch.up ? 1 : 0);
+    // Edge-triggered: true only on the frame the key went down.
+    wasPressed(code) {
+      return pressed.has(code);
     },
-    run() { return has(RUN) || touch.run; },
-    // Driving: W/up = gas, S/down = reverse, A/D = steer, Space = handbrake.
-    throttle() {
-      if (has(UP) || touch.up) return 1;
-      if (has(DOWN) || touch.down) return -1;
-      return 0;
+    // Movement axis from WASD/arrows: {x: strafe, y: forward} in [-1, 1].
+    // A connected gamepad's left stick adds to the same axis.
+    moveAxis() {
+      const f = (held.has(cfg.KEYS.forward) || held.has('ArrowUp') ? 1 : 0)
+        - (held.has(cfg.KEYS.back) || held.has('ArrowDown') ? 1 : 0);
+      const s = (held.has(cfg.KEYS.right) || held.has('ArrowRight') ? 1 : 0)
+        - (held.has(cfg.KEYS.left) || held.has('ArrowLeft') ? 1 : 0);
+      return {
+        x: Math.max(-1, Math.min(1, s + padAxis.x)),
+        y: Math.max(-1, Math.min(1, f + padAxis.y)),
+      };
     },
-    steer() {
-      return (has(RIGHT) || touch.right ? 1 : 0) - (has(LEFT) || touch.left ? 1 : 0);
+    isRunning() {
+      return held.has(cfg.KEYS.run) || held.has('ShiftRight');
     },
-    brake() { return keys.has('Space'); },
-    // Horn is held, not queued: C (or the horn button) toots while held.
-    horn() { return has(HORN); },
-    zoomLevel() { return zoomLevel; },
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+    consumeLook() {
+      if (lookDx === 0 && lookDy === 0) return null;
+      const out = { dx: lookDx, dy: lookDy };
+      lookDx = 0;
+      lookDy = 0;
+      return out;
     },
+    isMouseDown() {
+      return mouseDown;
+    },
+    hadGesture() {
+      return anyGesture;
+    },
+    hasGamepad() {
+      return !!(navigator.getGamepads && navigator.getGamepads()[0]);
+    },
+    // Called by update() each frame; kept out of the public API by the
+    // underscore, but attached so update() (module scope) can reach the
+    // closure's pollGamepad.
+    _pollGamepad: pollGamepad,
   };
+  return G.input;
 }
+
+export function update(G, dt) {
+  void dt;
+  // Poll the gamepad before clearing edge presses, so pad button presses
+  // land in the same frame's wasPressed() window as keyboard presses.
+  if (G.input) {
+    // pollGamepad lives in the init closure; reach it via a stored hook.
+    if (typeof G.input._pollGamepad === 'function') G.input._pollGamepad();
+  }
+  // Clear edge presses so wasPressed() is true for exactly one frame.
+  if (G.input) G.input.pressed.clear();
+}
+
+export default { init, update };

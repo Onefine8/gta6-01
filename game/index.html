@@ -1,56 +1,96 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Palmetto Bay Heat — an open-world crime game. Steal cars, run missions, drive taxi fares, and outrun the Palmetto Bay police.">
-<meta name="theme-color" content="#0d1526">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d1526'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%23f2c94c'%3E%E2%98%85%3C/text%3E%3C/svg%3E">
-<title>Palmetto Bay Heat — Open-World Crime Game</title>
-<style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1526; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  #touch { display: none; }
-  @media (pointer: coarse) {
-    #touch { display: block; position: fixed; inset: auto 0 0 0; pointer-events: none; z-index: 5; }
-    #touch button {
-      pointer-events: auto; position: absolute; width: 64px; height: 64px; border-radius: 50%;
-      border: 2px solid rgba(255,255,255,0.6); background: rgba(12,16,24,0.55); color: #fff;
-      font: bold 22px system-ui, sans-serif; touch-action: none;
-    }
-    #touch .up { left: 84px; bottom: 150px; }
-    #touch .down { left: 84px; bottom: 70px; }
-    #touch .left { left: 8px; bottom: 110px; }
-    #touch .right { left: 160px; bottom: 110px; }
-    #touch .enter { right: 16px; bottom: 110px; background: rgba(242,201,76,0.7); color: #10141b; }
-    #touch .punch { right: 96px; bottom: 70px; }
-    #touch .race { right: 16px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
-    #touch .mission { right: 80px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
-    #touch .repair { right: 144px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
-    #touch .business { right: 272px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
-    #touch .help { right: 208px; bottom: 190px; width: 52px; height: 52px; font-size: 16px; }
-  }
-  #noscript { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 18px system-ui, sans-serif; background: #0d1526; z-index: 10; text-align: center; padding: 24px; }
-</style>
+<title>Meridian Heat — Port Meridian</title>
+<link rel="stylesheet" href="style.css">
+<script src="vendor/three.min.js"></script>
 </head>
 <body>
-<canvas id="game" aria-label="Palmetto Bay Heat: an open-world crime game. Explore the city on foot or by car, take missions and taxi fares, repair at the garage, and outrun the police."></canvas>
-<noscript><p id="noscript">Palmetto Bay Heat needs JavaScript to run — please enable it and reload.</p></noscript>
-<p id="status" role="status" aria-live="polite"></p>
-<div id="touch" aria-hidden="true">
-  <button class="up" data-touch="up" type="button">▲</button>
-  <button class="down" data-touch="down" type="button">▼</button>
-  <button class="left" data-touch="left" type="button">◀</button>
-  <button class="right" data-touch="right" type="button">▶</button>
-  <button class="enter" data-touch="enter" type="button">E</button>
-  <button class="punch" data-touch="punch" type="button">Q</button>
-  <button class="race" data-touch="race" type="button">R</button>
-  <button class="mission" data-touch="mission" type="button">M</button>
-  <button class="repair" data-touch="repair" type="button">G</button>
-  <button class="business" data-touch="business" type="button">B</button>
-  <button class="help" data-touch="help" type="button">?</button>
+<!-- ======================= HUD (in-game overlay) ======================= -->
+<div id="hud" class="hidden">
+  <div id="hud-top-left">
+    <div id="health-wrap" title="Health">
+      <div id="health-bar"></div>
+      <span id="health-num">100</span>
+    </div>
+    <div id="money">$250</div>
+    <div id="stars" title="Wanted level">☆☆☆☆☆</div>
+  </div>
+
+  <div id="hud-top-right">
+    <canvas id="minimap" width="180" height="180"></canvas>
+    <div id="radio">MERIDIAN FM</div>
+  </div>
+
+  <div id="hud-bottom-left">
+    <div id="objective">Welcome to Port Meridian</div>
+    <div id="mission-tracker"></div>
+  </div>
+
+  <div id="hud-bottom-right">
+    <div id="speed">0 km/h</div>
+    <div id="controls-hint">WASD drive / walk &middot; E enter car &middot; Space jump &middot; Shift run &middot; R radio &middot; Esc pause</div>
+  </div>
+
+  <div id="message" class="hidden"></div>
+  <div id="wanted-flash" class="hidden"></div>
 </div>
-<script type="module" src="./src/main.js"></script>
+
+<!-- ======================= Start screen ======================= -->
+<div id="menu">
+  <div class="menu-inner">
+    <h1 class="game-title">MERIDIAN<br>HEAT</h1>
+    <p class="tagline">Port Meridian &mdash; drive it, steal it, own it.</p>
+    <p class="story-blurb">
+      Rook is a getaway driver with no crew and one fixer: Mara Voss.
+      Dante Kroll owns the harbor &mdash; and he wants Rook gone.
+      Eight jobs stand between Rook and the top of Port Meridian.
+    </p>
+    <div class="menu-buttons">
+      <button id="start-button" class="btn primary">▶ New Game</button>
+      <button id="continue-button" class="btn hidden">Continue</button>
+      <button id="mute-button" class="btn">🔊 Sound: On</button>
+    </div>
+    <div class="how-to">
+      <h2>How to play</h2>
+      <ul>
+        <li><b>WASD</b> &mdash; walk / drive &nbsp; <b>Shift</b> &mdash; run &nbsp; <b>Space</b> &mdash; jump</li>
+        <li><b>E</b> &mdash; steal / enter a car &nbsp; <b>Mouse</b> &mdash; aim &amp; shoot (click to fire)</li>
+        <li><b>R</b> &mdash; radio &nbsp; <b>H</b> &mdash; horn &nbsp; <b>C</b> &mdash; camera &nbsp; <b>Esc</b> &mdash; pause</li>
+        <li>Follow the waypoint. Lose the cops. Finish all 8 missions.</li>
+      </ul>
+    </div>
+    <p class="footnote">An original open-world crime game. All characters, places and story are fictional.</p>
+  </div>
+</div>
+
+<!-- ======================= Pause menu ======================= -->
+<div id="pause-menu" class="hidden">
+  <div class="menu-inner">
+    <h1 class="game-title small">PAUSED</h1>
+    <p class="tagline">Port Meridian waits for no one. Except now.</p>
+    <div class="menu-buttons">
+      <button id="resume-button" class="btn primary">Resume</button>
+      <button id="restart-button" class="btn">Restart</button>
+      <button id="quit-button" class="btn">Quit to Menu</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= Busted / Wasted ======================= -->
+<div id="end-screen" class="hidden">
+  <div class="menu-inner">
+    <h1 id="end-title" class="game-title small">BUSTED!</h1>
+    <p id="end-subtitle" class="tagline">The Meridian PD caught up with Rook.</p>
+    <div class="menu-buttons">
+      <button id="retry-button" class="btn primary">Retry</button>
+      <button id="end-menu-button" class="btn">Main Menu</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="src/main.js"></script>
 </body>
 </html>

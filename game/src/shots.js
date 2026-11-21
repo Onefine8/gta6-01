@@ -1,158 +1,199 @@
-// The screenshot scenes behind ?shot=chase|walk|mission|night. Each one stages a
-// real game state — a car, police, pedestrians, traffic and a live mission —
-// using the game's own state, then paints it twice so the frame is exactly what
-// a player sees mid-game. The same seed always gives the same frame.
-import { FIELD } from './config.js';
-import { enterCar } from './player.js';
-import { startMission } from './missions.js';
-import { SCREEN_PLAY } from './render.js';
-import { nearestRoadPoint } from './world.js';
+// Meridian Heat — screenshot staging presets (?shot=chase|walk|mission|night).
+// Each preset drops the player into a composed, already-playing scene so a
+// headless screenshot shows the game at its best: chase, on-foot city,
+// mission in progress, neon night. Audio stays silent in shot mode.
+// Only imports config.js / random.js; everything else goes through G and is
+// guarded, so staging never throws when a gameplay module is absent.
+import { CONFIG } from './config.js';
+import { createRng } from './random.js';
 
-function snapToRoad(x, y) {
-  const p = nearestRoadPoint(x, y);
-  return { x: p.x, y: p.y };
+const cfg = CONFIG;
+
+const PRESETS = {
+  chase: {
+    dayTime: 15.0, wanted: 2,
+    player: { x: 36, z: 0, heading: Math.PI / 2 },
+    note: 'Police pursuit on a downtown avenue',
+  },
+  walk: {
+    dayTime: 11.0, wanted: 0,
+    // Sidewalk edge of the x=0 downtown avenue, facing down the road so
+    // the follow camera (11 m behind) frames a street vista, not a wall.
+    player: { x: 7, z: 40, heading: Math.PI },
+    note: 'On foot in Downtown Port Meridian',
+  },
+  mission: {
+    dayTime: 13.5, wanted: 0, mission: 0,
+    player: { x: -18, z: 84, heading: Math.PI },
+    note: 'Mission 1 — First Wheels: steal a car, reach Mara’s garage',
+  },
+  night: {
+    dayTime: 21.5, wanted: 1,
+    // Same downtown avenue, facing -z: building neon strips sit on the
+    // maxZ faces, so they read from this direction; Meridian Tower closes
+    // the vista at the end of the road.
+    player: { x: 7, z: -40, heading: Math.PI },
+    note: 'Neon night in Downtown Port Meridian',
+  },
+};
+
+function $(id) {
+  return document.getElementById(id);
 }
 
-function placeTrafficNear(state, cx, cy, random) {
-  // Scatter traffic cars on the roads around the camera centre.
-  const offsets = [[-260, -40], [300, 40], [-80, 260], [180, -260], [-420, 120], [420, -120], [60, 420], [-180, -420]];
-  state.traffic.forEach((car, i) => {
-    const o = offsets[i % offsets.length];
-    const p = snapToRoad(cx + o[0], cy + o[1]);
-    car.x = p.x + (o[0] > 0 ? 22 : -22);
-    car.y = p.y + (o[1] > 0 ? 22 : -22);
-    car.vertical = Math.abs(o[0]) < Math.abs(o[1]);
-    car.angle = car.vertical ? Math.PI / 2 : 0;
-    car.speed = 120 + random() * 60;
-  });
+function showHud() {
+  const hud = $('hud');
+  if (hud) hud.classList.remove('hidden');
+  const menu = $('menu');
+  if (menu) menu.classList.add('hidden');
+  const pause = $('pause-menu');
+  if (pause) pause.classList.add('hidden');
+  const end = $('end-screen');
+  if (end) end.classList.add('hidden');
 }
 
-function placePedsNear(state, cx, cy, random) {
-  state.peds.forEach((ped, i) => {
-    const a = (i / state.peds.length) * Math.PI * 2;
-    const p = snapToRoad(cx + Math.cos(a) * (120 + random() * 260), cy + Math.sin(a) * (120 + random() * 200));
-    // Pedestrians walk the sidewalks, just off the road edge.
-    ped.x = p.x + 62;
-    ped.y = p.y + 62;
-    ped.fleeing = false;
-  });
+function placePlayer(G, spot) {
+  const p = G.player;
+  if (!p) return;
+  p.x = spot.x;
+  p.z = spot.z;
+  p.heading = spot.heading;
+  if (typeof p.speed !== 'undefined') p.speed = 0;
+  if (typeof p.health !== 'undefined') p.health = cfg.PLAYER.maxHealth;
+  if (typeof p.inVehicle !== 'undefined') p.inVehicle = false;
+  if (p.pos) { p.pos.x = spot.x; p.pos.z = spot.z; }
 }
 
-function putPlayerInCar(state, x, y, angle) {
-  const car = state.parkedCars.find((c) => c.model === 'Sunset Coupe') || state.parkedCars[0];
-  car.x = x;
-  car.y = y;
-  car.angle = angle;
-  car.speed = 260;
-  car.health = 82;
-  enterCar(state.player, car);
-  state.player.x = x;
-  state.player.y = y;
-  return car;
+function setWanted(G, level) {
+  // Prefer the police module's own setter when it exists.
+  if (G.police && typeof G.police.setWanted === 'function') {
+    G.police.setWanted(level);
+    return;
+  }
+  if (G.police) G.police.wanted = level;
+  else G.police = { wanted: level, chasing: level > 0 };
 }
 
-function spawnPoliceChase(state, x, y) {
-  state.police.cars = [];
-  // Cruisers right behind the player, in the road lanes (never on buildings).
-  const spots = [
-    { x: x - 260, y: y + 22, angle: 0 },
-    { x: x - 340, y: y - 22, angle: 0 },
-    { x: x - 430, y: y + 22, angle: 0 },
-  ];
-  spots.forEach((s, i) => {
-    state.police.cars.push({
-      id: i + 1, x: s.x, y: s.y, angle: s.angle, speed: 300, health: 100,
-      color: '#1d4ed8', model: 'PBPD Cruiser', topSpeed: 380,
-      parked: false, driver: 'police', stolen: false, lightPhase: i * 1.7,
+function stageChaseVehicles(G, rng) {
+  // Put the player in a car and police cars behind, when those modules exist.
+  if (G.vehicles && typeof G.vehicles.spawnCar === 'function' && G.player) {
+    const car = G.vehicles.spawnCar({
+      x: G.player.x, z: G.player.z, heading: G.player.heading, model: 'sedan', color: 0xc03028,
     });
-  });
+    if (car && typeof G.vehicles.enter === 'function') G.vehicles.enter(car);
+    else if (car && G.player) { G.player.inVehicle = true; G.player.vehicle = car; }
+    if (car) car.speed = 26;
+  } else if (G.vehicles && Array.isArray(G.vehicles.list) && G.player) {
+    // Fallback: a plain car record the render loop can draw later.
+    const car = {
+      x: G.player.x, z: G.player.z, heading: G.player.heading,
+      speed: 26, color: 0xc03028, model: 'sedan', isPlayer: true,
+    };
+    G.vehicles.list.push(car);
+    G.player.inVehicle = true;
+    G.player.vehicle = car;
+  }
+  if (G.police && typeof G.police.spawnPursuit === 'function') {
+    G.police.spawnPursuit(2);
+  } else if (G.police && typeof G.police.spawn === 'function') {
+    G.police.spawn({ x: G.player.x - 18, z: G.player.z - 6, heading: G.player.heading });
+    G.police.spawn({ x: G.player.x - 26, z: G.player.z + 8, heading: G.player.heading });
+  }
+  void rng;
 }
 
-function spawnRoadblockAhead(state, x, y) {
-  // A striped PBPD roadblock on the road ahead of the player.
-  state.police.roadblocks = [{ x: x + 420, y, angle: Math.PI / 2, timer: 30 }];
+function stageMission(G, preset) {
+  if (G.missions && typeof G.missions.start === 'function') {
+    G.missions.start(preset.mission || 0);
+  } else if (G.missions) {
+    G.missions.currentIndex = preset.mission || 0;
+    G.missions.active = true;
+  }
+  // Waypoint marker: garage just ahead of the player.
+  if (G.hud && typeof G.hud.setObjective === 'function') {
+    G.hud.setObjective('Steal a car and drive it to Mara’s garage');
+  }
+  const obj = $('objective');
+  if (obj) obj.textContent = 'Steal a car and drive it to Mara’s garage';
 }
 
-function spawnHeliOverhead(state, x, y) {
-  state.police.heli = { angle: 0.6, x: x + 160, y: y - 160 };
+function stageWalkCrowd(G) {
+  // A few pedestrians nearby make the street feel alive.
+  if (G.peds && typeof G.peds.spawn === 'function') {
+    for (let i = 0; i < 6; i++) {
+      G.peds.spawn({
+        x: G.player.x + (i - 3) * 6,
+        z: G.player.z + 14 - i * 3,
+      });
+    }
+  }
 }
 
-/**
- * Stage `state` for the named scene and return the screen to draw over it.
- * Unknown names stage the chase (the cover).
- */
-export function stageShot(name, state, random) {
-  state.elapsed = 12;
-  state.player.money = 1250;
-  state.player.health = 86;
-  state.missions.packagesFound = 4;
-  state.city.packages.forEach((p, i) => { p.taken = i < 4; });
-  if (name === 'walk') {
-    state.time.hour = 14.5;
-    state.time.isNight = false;
-    state.time.raining = false;
-    state.wanted = 0;
-    // Rico on foot outside Marina Garage, where cars get repaired.
-    state.player.x = 520;
-    state.player.y = 360;
-    state.player.angle = -Math.PI / 2;
-    placeTrafficNear(state, 520, 360, random);
-    placePedsNear(state, 520, 360, random);
-    state.missions.message = 'Explore Palmetto Bay on foot — packages hide in alleys and parks.';
-    state.missions.messageTimer = 99;
-    state.feed = ['Taxi fare done  +$120', 'Hidden package found! 4/12  +$100'];
-    return { screen: SCREEN_PLAY, best: 0 };
+export function init(G) {
+  const params = new URLSearchParams(window.location.search);
+  const shot = params.get('shot');
+  if (!shot || !PRESETS[shot]) return null;
+
+  const preset = PRESETS[shot];
+  const seedParam = params.get('seed');
+  const seed = seedParam !== null ? Number(seedParam) : cfg.SHOTS[shot].seed;
+  const rng = createRng(Number.isFinite(seed) ? seed : 7);
+
+  G.shotMode = true;
+  G.shot = shot;
+
+  // Silence audio completely in screenshot mode.
+  if (G.audio && typeof G.audio.setMuted === 'function') G.audio.setMuted(true);
+
+  // Time of day for the shot (world.update advances the clock from here).
+  G.time.dayTime = preset.dayTime;
+
+  // Player placement + wanted level.
+  placePlayer(G, preset.player);
+  setWanted(G, preset.wanted);
+
+  // Per-preset staging.
+  if (shot === 'chase') stageChaseVehicles(G, rng);
+  if (shot === 'walk') stageWalkCrowd(G);
+  if (shot === 'mission') stageMission(G, preset);
+  if (shot === 'night' && G.police && typeof G.police.spawn === 'function') {
+    // Police car ahead on the same avenue, in frame, lights on.
+    G.police.spawn({ x: 0, z: G.player.z - 25, heading: G.player.heading });
   }
-  if (name === 'mission') {
-    state.time.hour = 17.5;
-    state.time.isNight = false;
-    state.time.raining = false;
-    state.wanted = 1;
-    putPlayerInCar(state, 2000, 800, 0);
-    startMission(state.missions, 1);
-    state.missions.introTimer = 99;
-    state.missions.step = 0;
-    state.objectivePos = { x: 360, y: 2060 };
-    placeTrafficNear(state, 2000, 800, random);
-    placePedsNear(state, 2000, 800, random);
-    spawnPoliceChase(state, 2000, 800);
-    state.police.cars = state.police.cars.slice(0, 1);
-    // A live taxi fare runs beside the mission, so the HUD shows both.
-    state.missions.taxi = { active: true, phase: 'dropoff', px: 2000, py: 800, dx: 2800, dy: 2000, name: 'Lighthouse Point', timer: 64, fare: 210 };
-    state.feed = ['Near miss  +$25'];
-    return { screen: SCREEN_PLAY, best: 0 };
+
+  // Skip the start screen: go straight into the playing scene.
+  G.state = 'playing';
+  if (G.render && typeof G.render.setCameraMode === 'function') {
+    G.render.setCameraMode('follow');
   }
-  if (name === 'night') {
-    state.time.hour = 22.5;
-    state.time.isNight = true;
-    state.time.raining = true;
-    state.wanted = 4;
-    putPlayerInCar(state, 2000, 1600, Math.PI / 2);
-    state.missions.message = 'Night rain over the bay — lose the heat before dawn.';
-    state.missions.messageTimer = 99;
-    placeTrafficNear(state, 2000, 1600, random);
-    placePedsNear(state, 2000, 1600, random);
-    spawnPoliceChase(state, 2000, 1600);
-    state.police.cars = state.police.cars.slice(0, 2);
-    spawnHeliOverhead(state, 2000, 1600);
-    return { screen: SCREEN_PLAY, best: 0 };
+  showHud();
+
+  // Banner text so the shot reads as a live mission moment.
+  const msg = $('message');
+  if (msg) {
+    msg.textContent = preset.note;
+    msg.classList.remove('hidden');
   }
-  // chase (cover): broad daylight, three stars, three cruisers, mission objective live.
-  state.time.hour = 11.5;
-  state.time.isNight = false;
-  state.time.raining = false;
-  state.wanted = 3;
-  putPlayerInCar(state, 2000, 1200, 0);
-  startMission(state.missions, 0);
-  state.missions.step = 1;
-  state.missions.introTimer = 0;
-  state.objectivePos = { x: 360, y: 360 };
-  state.missions.message = 'Drive the coupe to Marina Garage — and shake the PBPD!';
-  state.missions.messageTimer = 99;
-  placeTrafficNear(state, 2000, 1200, random);
-  placePedsNear(state, 2000, 1200, random);
-  spawnPoliceChase(state, 2000, 1200);
-  spawnRoadblockAhead(state, 2000, 1200);
-  state.feed = ['Near miss  +$25', 'Wanted level rose to 3 stars'];
-  return { screen: SCREEN_PLAY, best: 0 };
+  if (G.hud && typeof G.hud.showMessage === 'function') {
+    G.hud.showMessage(preset.note);
+  }
+
+  G.shotStaged = { name: shot, seed: rng.seed, note: preset.note };
+  return G.shotStaged;
 }
+
+export function update(G, dt) {
+  void dt;
+  // Shots are static staging: nothing per-frame. The world clock and the
+  // normal game loop keep running so traffic, water and the sun stay alive.
+  if (!G.shotMode) return;
+  // Chase: hold the throttle so the getaway car keeps rolling at pursuit
+  // speed (and the speedometer reads motion) instead of coasting to a
+  // stop while the screenshot is framed. Staging-only: no gameplay module
+  // is touched, and the key is only held while this preset is staged.
+  if (G.shot === 'chase' && G.input && G.input.held) {
+    G.input.held.add('KeyW');
+  }
+}
+
+export default { init, update, PRESETS };

@@ -1,9 +1,10 @@
-// A small seeded random number generator (mulberry32): the same seed gives the same game,
-// which is what makes the screenshot scenes repeatable.
-
-export function createRandom(seed) {
-  let a = seed | 0;
-  return function random() {
+// Meridian Heat — seeded random number generation.
+// mulberry32: small, fast, deterministic. Same seed => same city, same
+// traffic layout, same screenshot staging. Pure module, no browser globals.
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
@@ -11,37 +12,53 @@ export function createRandom(seed) {
   };
 }
 
-// Small helpers over a seeded rng, so every system draws variety the same way
-// and a fixed seed still replays the same city, traffic and jobs.
-export function randRange(random, min, max) {
-  return min + random() * (max - min);
-}
-
-export function randInt(random, min, max) {
-  return min + Math.floor(random() * (max - min + 1));
-}
-
-export function pick(random, list) {
-  return list[Math.floor(random() * list.length)];
-}
-
-export function shuffle(random, list) {
-  const out = list.slice();
-  for (let i = out.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(random() * (i + 1));
-    const tmp = out[i];
-    out[i] = out[j];
-    out[j] = tmp;
+// Hash a string into a 32-bit seed (FNV-1a), so "?seed=meridian" works too.
+export function hashSeed(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value >>> 0;
+  const s = String(value ?? 'meridian');
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  return out;
+  return h >>> 0;
 }
 
-// Turn a short string into a stable 32-bit seed (FNV-1a), for named seeds.
-export function seedFromString(text) {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
+// Create the RNG bundle used everywhere in the game. G.rng is one of these.
+export function createRng(seed) {
+  const seedValue = hashSeed(seed);
+  const next = mulberry32(seedValue);
+  return {
+    seed: seedValue,
+    next,
+    // Float in [min, max).
+    range(min, max) {
+      return min + next() * (max - min);
+    },
+    // Integer in [min, max] inclusive.
+    int(min, max) {
+      return Math.floor(min + next() * (max - min + 1));
+    },
+    // Pick one element of an array.
+    pick(array) {
+      return array[Math.floor(next() * array.length)];
+    },
+    // True with probability p (0..1).
+    chance(p) {
+      return next() < p;
+    },
+    // Shuffle a copy of an array (Fisher-Yates).
+    shuffle(array) {
+      const out = array.slice();
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(next() * (i + 1));
+        const tmp = out[i];
+        out[i] = out[j];
+        out[j] = tmp;
+      }
+      return out;
+    },
+  };
 }
+
+export default { mulberry32, hashSeed, createRng };

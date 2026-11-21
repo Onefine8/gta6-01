@@ -1,959 +1,394 @@
-// Boot and the one loop for Palmetto Bay Heat. The game moves between title,
-// play, paused, wasted and busted screens; the world advances in fixed 1/60 s
-// steps. Progress (cash, missions, packages, best race) is saved to localStorage.
-//
-// ?shot=chase|walk|mission|night (with &seed=N) stages that scene instead of
-// running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { FIELD, HEAL_COST, REPAIR_COST, SAVE_KEY, STEP, TIME, VEHICLE_MODELS, WORLD } from './config.js';
-import { createRandom } from './random.js';
-import { createCity, createParkedCars, nearSite } from './world.js';
-import { createPlayer, enterCar, exitCar, nearestCar, punch, stepPlayer } from './player.js';
-import { createPedestrians, createTraffic, startleTraffic, stepDrivenCar, stepPedestrian, stepTrafficCar } from './vehicles.js';
-import { addWanted, clearWanted, createPolice, stepPolice } from './police.js';
-import { MISSION_DEFS, createMissionState, objectiveText, showMessage, startMission, startTaxi, stepMissions, stepTaxi, taxiObjective } from './missions.js';
-import { MISSION2_DEFS, canStartMission2, createMission2State, mission2ObjectivePos, startMission2, stepMissions2 } from './missions2.js';
-import { MISSION3_DEFS, canStartMission3, createMission3State, mission3ObjectivePos, startMission3, stepMissions3 } from './missions3.js';
-import { MISSION4_DEFS, canStartMission4, createMission4State, mission4ObjectivePos, startMission4, stepMissions4 } from './missions4.js';
-import { MISSION5_DEFS, canStartMission5, createMission5State, mission5ObjectivePos, startMission5, stepMissions5 } from './missions5.js';
-import { PROPERTY_DEFS, buyProperty, canBuyProperty, collectRent, createPropertyState, deserializeProperties, nearestProperty, nearestPropertyWithRent, serializeProperties, stepProperties, totalRentWaiting } from './properties.js';
-import { buildLeagueResults, createLeagueState, deserializeLeague, isLeagueRound, leagueHudLine, recordLeagueRace, serializeLeague } from './league.js';
-import { createTrafficAIState, stepTrafficSystem } from './traffic.js';
-import { createDayNightState, deserializeDayNight, serializeDayNight, stepDayNight } from './daynight.js';
-import { addHeatForStars, createHeatState, deserializeHeat, payBribe, serializeHeat, stepHeat } from './heat.js';
-import { breakSmugglingStreak, createSmugglingState, smugglingObjective, startSmugglingRun, stepSmuggling } from './smuggling.js';
-import { buyDealershipCar, createDealershipState, deserializeDealership, featuredCar, serializeDealership, stepDealership, tradeInCar } from './dealership.js';
-import { buyNextUpgrade, createTuningState, deserializeTuning, serializeTuning, stepTuning } from './tuning.js';
-import { createCasinoState, deserializeCasino, playBlackjack, playRoulette, serializeCasino, spinSlots, stepCasino } from './casino.js';
-import { createWeatherState, stepWeather, weatherAsTime } from './weather.js';
-import { canShoot, collectWeaponPickups, createWeaponsState, shootFromPlayer, stepWeapons } from './weapons.js';
-import { createMinigameState, minigameObjective, stepMinigames } from './minigames.js';
-import { createRadioState, stepRadio } from './radio.js';
-import { RACE_CIRCUITS, canStartRace, createRaceState, currentRaceCheckpoint, nearestCircuit, startRace, stepRace } from './races.js';
-import { BUSINESS_DEFS, buyBusiness, canBuyBusiness, collectBusiness, createBusinessState, nearestBusiness, nearestBusinessWithTill, stepBusinesses, totalTill } from './business.js';
-import { ACTION_BUSINESS, ACTION_CASINO_BLACKJACK, ACTION_CASINO_ROULETTE, ACTION_CASINO_SLOTS, ACTION_CONFIRM, ACTION_DEALERSHIP, ACTION_ENTER, ACTION_HELP, ACTION_MISSION, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_RACE, ACTION_REPAIR, ACTION_SMUGGLING, ACTION_TAXI, ACTION_TUNE, createInput } from './input.js';
-import { createAudio } from './audio.js';
-import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+// Meridian Heat — bootstrap, game loop and state machine.
+// Builds the shared object G, wires every module, runs the fixed update
+// order from the spec, and owns the menu / playing / paused / busted /
+// wasted states. Gameplay modules (Builder B) are loaded dynamically so the
+// engine boots cleanly with or without them; engine modules are static.
+// Only imports config.js / random.js + engine modules + global THREE.
+import { CONFIG } from './config.js';
+import { createRng } from './random.js';
+import * as world from './world.js';
+import * as render from './render.js';
+import * as input from './input.js';
+import * as audio from './audio.js';
+import * as save from './save.js';
+import * as shots from './shots.js';
 
-const MAX_FRAME = 0.25;
+const cfg = CONFIG;
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+// Gameplay modules owned by Builder B. Loaded dynamically, in loop order;
+// a missing module is skipped (logged, never fatal) so the engine boots.
+const GAMEPLAY_MODULES = [
+  'player',
+  'vehicles',
+  'traffic',
+  'peds',
+  'police',
+  'missions',
+  'combat',
+  'activities',
+  'hud',
+  'story',
+];
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const random = createRandom(seed);
-const city = createCity(random);
-
-function createState() {
-  const player = createPlayer(600, 320);
-  const parkedCars = createParkedCars(random, city);
-  // The Container Heist needs a hauler to steal: make sure one is parked by
-  // the harbor yard, whatever the random draw gave the street.
-  const hauler = VEHICLE_MODELS.find((m) => m.name === 'Container Hauler');
-  if (hauler) {
-    let nearest = null;
-    let nearestD = Infinity;
-    for (const car of parkedCars) {
-      const d = Math.hypot(car.x - 500, car.y - 2050);
-      if (d < nearestD) { nearestD = d; nearest = car; }
-    }
-    if (nearest) {
-      nearest.model = hauler.name;
-      nearest.color = hauler.color;
-      nearest.topSpeed = hauler.top;
-    }
-  }
-  // Harbor Lights (mission 11) needs a Sunset Roadster to steal: make
-  // sure one is parked by the Beachfront Pier, whatever the random draw
-  // gave the street.
-  const roadster = VEHICLE_MODELS.find((m) => m.name === 'Sunset Roadster');
-  if (roadster) {
-    let nearest = null;
-    let nearestD = Infinity;
-    for (const car of parkedCars) {
-      const d = Math.hypot(car.x - 600, car.y - 2260);
-      if (d < nearestD) { nearestD = d; nearest = car; }
-    }
-    if (nearest) {
-      nearest.model = roadster.name;
-      nearest.color = roadster.color;
-      nearest.topSpeed = roadster.top;
-    }
-  }
-  const state = {
-    player,
-    city,
-    parkedCars,
-    traffic: createTraffic(random, 14),
-    peds: createPedestrians(random, 26),
-    police: createPolice(),
-    missions: createMissionState(),
-    missions2: createMission2State(),
-    missions3: createMission3State(),
-    missions4: createMission4State(),
-    missions5: createMission5State(),
-    properties: createPropertyState(),
-    league: createLeagueState(),
-    trafficAI: createTrafficAIState(),
-    daynight: createDayNightState(),
-    heat: createHeatState(),
-    smuggling: createSmugglingState(),
-    dealership: createDealershipState(random),
-    tuning: createTuningState(),
-    casino: createCasinoState(),
-    weather: createWeatherState(),
-    weapons: createWeaponsState(),
-    minigames: createMinigameState(),
-    radio: createRadioState(),
-    race: createRaceState(),
-    business: createBusinessState(),
-    missionsDone: 0,
-    time: { hour: TIME.startHour, isNight: false, raining: false },
-    elapsed: 0,
-    wanted: 0,
-    wantedTimer: 26,
-    busted: false,
-    wasted: false,
-    bailCost: 150,
-    objectivePos: null,
-    weatherTimer: 40,
-    saveTimer: 0,
-    // New in this round: a short event feed for the HUD, run stats, the help
-    // overlay flag, a pending-steal flag for mission 1, and near-miss timing.
-    feed: [],
-    stats: { earned: 0, nearMiss: 0, taxis: 0, racesWon: 0 },
-    helpOpen: false,
-    pendingSteal: false,
-    prevWanted: 0,
-    nearMissCooldown: 0,
-    hornCooldown: 0,
-    skidCooldown: 0,
+function createEvents() {
+  const listeners = new Map();
+  return {
+    on(event, fn) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(fn);
+    },
+    off(event, fn) {
+      const list = listeners.get(event);
+      if (!list) return;
+      const i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    },
+    emit(event, payload) {
+      const list = listeners.get(event);
+      if (!list) return;
+      for (const fn of list.slice()) {
+        try { fn(payload); } catch (e) { console.error('[events]', event, e); }
+      }
+    },
   };
-  return state;
 }
 
-function pushFeed(state, text) {
-  state.feed.push(text);
-  if (state.feed.length > 6) state.feed.shift();
+function parseSeed() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get('seed');
+  if (raw !== null && raw !== '' && Number.isFinite(Number(raw))) return Number(raw);
+  if (raw !== null && raw !== '') return raw;
+  return 20261121; // deterministic default so every fresh boot looks the same
 }
 
-const state = createState();
-const renderer = createRenderer(canvas);
-const audio = createAudio();
-// Debug/testing handle: lets an automated play-test read the live state.
-window.__game = state;
+function defaultPlayer() {
+  return {
+    x: -18, z: 108, heading: Math.PI,
+    speed: 0, health: cfg.PLAYER.maxHealth,
+    money: cfg.START_MONEY, wanted: 0,
+    onFoot: true, inVehicle: false, vehicle: null,
+  };
+}
 
-function saveGame() {
-  try {
-    const taken = state.city.packages.map((p) => (p.taken ? 1 : 0));
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-      money: state.player.money,
-      missionsDone: state.missionsDone,
-      missionIndex: state.missions.index,
-      packages: taken,
-      raceBest: state.race.best,
-      raceWins: state.race.wins,
-      business: { owned: state.business.owned, till: state.business.till },
-      weather: { type: state.weather.type, hour: state.weather.hour, day: state.weather.day },
-      weapons: { equipped: state.weapons.equipped, shotsFired: state.weapons.shotsFired, shotsHit: state.weapons.shotsHit, kills: state.weapons.kills },
-      minigames: { courier: state.minigames.courier.drops, vigilante: state.minigames.vigilante.caught, rangeBest: state.minigames.range.best },
-      missions2Index: state.missions2.index,
-      missions3Index: state.missions3.index,
-      missions4Index: state.missions4.index,
-      missions5Index: state.missions5.index,
-      properties: serializeProperties(state.properties),
-      league: serializeLeague(state.league),
-      heat: serializeHeat(state.heat),
-      daynight: serializeDayNight(state.daynight),
-      smuggling: { streak: state.smuggling.streak, runs: state.smuggling.runs, earned: state.smuggling.earned, heat: state.smuggling.heat, dropIndex: state.smuggling.dropIndex },
-      dealership: serializeDealership(state.dealership),
-      tuning: serializeTuning(state.tuning),
-      casino: serializeCasino(state.casino),
-      radioStation: state.radio.stationIndex,
-      health: state.player.health,
-      stats: state.stats,
-    }));
-  } catch {
-    // Storage can be off: progress then lasts this visit only.
+function $(id) {
+  return document.getElementById(id);
+}
+
+function showOnly(id) {
+  for (const el of ['menu', 'pause-menu', 'end-screen']) {
+    const node = $(el);
+    if (node) node.classList.toggle('hidden', el !== id);
   }
+  const hud = $('hud');
+  if (hud) hud.classList.toggle('hidden', id === 'menu');
 }
 
-function loadGame() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (typeof data.money === 'number') state.player.money = data.money;
-    if (typeof data.missionsDone === 'number') {
-      state.missionsDone = data.missionsDone;
-      state.missions.index = Math.min(data.missionIndex ?? data.missionsDone, MISSION_DEFS.length);
-    }
-    if (Array.isArray(data.packages)) {
-      state.city.packages.forEach((p, i) => { p.taken = data.packages[i] === 1; });
-      state.missions.packagesFound = state.city.packages.filter((p) => p.taken).length;
-    }
-    if (Array.isArray(data.raceBest)) state.race.best = data.raceBest.slice(0, RACE_CIRCUITS.length);
-    else if (typeof data.raceBest === 'number') state.race.best = [data.raceBest, ...RACE_CIRCUITS.slice(1).map(() => null)];
-    if (typeof data.raceWins === 'number') state.race.wins = data.raceWins;
-    if (data.business && typeof data.business === 'object') {
-      if (data.business.owned && typeof data.business.owned === 'object') {
-        for (const b of BUSINESS_DEFS) {
-          if (data.business.owned[b.id]) state.business.owned[b.id] = true;
-        }
-      }
-      if (data.business.till && typeof data.business.till === 'object') {
-        for (const b of BUSINESS_DEFS) {
-          if (typeof data.business.till[b.id] === 'number') state.business.till[b.id] = data.business.till[b.id];
-        }
-      }
-    }
-    if (typeof data.health === 'number') state.player.health = data.health;
-    if (typeof data.missions2Index === 'number') state.missions2.index = Math.max(0, Math.min(MISSION2_DEFS.length, data.missions2Index));
-    if (typeof data.missions3Index === 'number') state.missions3.index = Math.max(0, Math.min(MISSION3_DEFS.length, data.missions3Index));
-    if (typeof data.missions4Index === 'number') state.missions4.index = Math.max(0, Math.min(MISSION4_DEFS.length, data.missions4Index));
-    if (typeof data.missions5Index === 'number') state.missions5.index = Math.max(0, Math.min(MISSION5_DEFS.length, data.missions5Index));
-    if (data.properties && typeof data.properties === 'object') state.properties = deserializeProperties(data.properties);
-    if (data.league && typeof data.league === 'object') state.league = deserializeLeague(data.league);
-    if (data.heat && typeof data.heat === 'object') state.heat = deserializeHeat(data.heat);
-    if (data.daynight && typeof data.daynight === 'object') state.daynight = deserializeDayNight(data.daynight);
-    if (data.smuggling && typeof data.smuggling === 'object') {
-      if (typeof data.smuggling.streak === 'number') state.smuggling.streak = Math.max(0, data.smuggling.streak);
-      if (typeof data.smuggling.runs === 'number') state.smuggling.runs = Math.max(0, data.smuggling.runs);
-      if (typeof data.smuggling.earned === 'number') state.smuggling.earned = Math.max(0, data.smuggling.earned);
-      if (typeof data.smuggling.heat === 'number') state.smuggling.heat = Math.max(0, data.smuggling.heat);
-      if (typeof data.smuggling.dropIndex === 'number') state.smuggling.dropIndex = Math.max(0, data.smuggling.dropIndex);
-    }
-    if (data.dealership && typeof data.dealership === 'object') deserializeDealership(state.dealership, data.dealership);
-    if (data.tuning && typeof data.tuning === 'object') deserializeTuning(state.tuning, data.tuning);
-    if (data.casino && typeof data.casino === 'object') deserializeCasino(state.casino, data.casino);
-    if (typeof data.radioStation === 'number') state.radio.stationIndex = Math.max(0, Math.min(3, data.radioStation));
-    if (data.weather && typeof data.weather === 'object') {
-      if (typeof data.weather.hour === 'number') state.weather.hour = data.weather.hour;
-      if (typeof data.weather.day === 'number') state.weather.day = data.weather.day;
-    }
-    if (data.weapons && typeof data.weapons === 'object') {
-      if (typeof data.weapons.shotsFired === 'number') state.weapons.shotsFired = data.weapons.shotsFired;
-      if (typeof data.weapons.shotsHit === 'number') state.weapons.shotsHit = data.weapons.shotsHit;
-      if (typeof data.weapons.kills === 'number') state.weapons.kills = data.weapons.kills;
-    }
-    if (data.stats && typeof data.stats === 'object') state.stats = { ...state.stats, ...data.stats };
-  } catch {
-    // A corrupt save is ignored; a fresh game starts instead.
+// Minimal HUD sync used only until the hud module (Builder B) loads.
+// It touches the same element ids from the spec, so the HUD is never blank.
+function fallbackHud(G) {
+  const p = G.player;
+  if (!p) return;
+  const bar = $('health-bar');
+  if (bar) bar.style.width = `${Math.max(0, Math.min(100, p.health))}%`;
+  const num = $('health-num');
+  if (num) num.textContent = String(Math.round(p.health));
+  const money = $('money');
+  if (money) money.textContent = `$${Math.floor(p.money || 0).toLocaleString('en-US')}`;
+  const stars = $('stars');
+  if (stars) {
+    const wanted = (G.police && typeof G.police.wanted === 'number')
+      ? G.police.wanted : (p.wanted || 0);
+    stars.textContent = '★'.repeat(wanted) + '☆'.repeat(cfg.POLICE.maxWanted - wanted);
+  }
+  const speed = $('speed');
+  if (speed) {
+    const kmh = Math.round(Math.abs(p.inVehicle && p.vehicle ? (p.vehicle.speed || 0) : (p.speed || 0)) * 3.6);
+    speed.textContent = `${kmh} km/h`;
   }
 }
 
-function updateObjectivePos() {
-  const m = state.missions;
-  if (state.race.active) {
-    state.objectivePos = currentRaceCheckpoint(state.race);
-    return;
-  }
-  // The second arc owns the arrow while it runs.
-  if (state.missions2.active) {
-    state.objectivePos = mission2ObjectivePos(state.missions2);
-    return;
-  }
-  // The third arc owns the arrow while it runs.
-  if (state.missions3.active) {
-    state.objectivePos = mission3ObjectivePos(state.missions3, state);
-    return;
-  }
-  // The fourth arc owns the arrow while it runs.
-  if (state.missions4.active) {
-    state.objectivePos = mission4ObjectivePos(state.missions4, state);
-    return;
-  }
-  // The fifth arc owns the arrow while it runs.
-  if (state.missions5.active) {
-    state.objectivePos = mission5ObjectivePos(state.missions5);
-    return;
-  }
-  if (!m.active || m.index >= MISSION_DEFS.length) {
-    const taxi = taxiObjective(m);
-    if (taxi) {
-      state.objectivePos = { x: taxi.x, y: taxi.y };
-      return;
+async function loadGameplayModules(G) {
+  const loaded = {};
+  for (const name of GAMEPLAY_MODULES) {
+    try {
+      const mod = await import(`./${name}.js`);
+      if (mod && typeof mod.init === 'function') mod.init(G);
+      loaded[name] = mod;
+    } catch (e) {
+      // Missing Builder B file: log once and keep going. The engine,
+      // the city and the camera all work without gameplay modules.
+      console.warn(`[main] gameplay module '${name}' not loaded:`, e.message);
+      loaded[name] = null;
     }
-    // A live side job (courier drop, vigilante hunt) owns the arrow next.
-    const side = minigameObjective(state.minigames);
-    if (side) {
-      state.objectivePos = { x: side.x, y: side.y };
-      return;
-    }
-    // A live smuggling run owns the arrow after the minigames.
-    const crate = smugglingObjective(state.smuggling);
-    if (crate) {
-      state.objectivePos = { x: crate.x, y: crate.y };
-      return;
-    }
-    // Free roam with rent waiting: point at the nearest owned property
-    // whose till is worth the drive.
-    if (totalRentWaiting(state.properties) >= 200) {
-      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-      const prop = nearestPropertyWithRent(state.properties, px, py);
-      if (prop) {
-        state.objectivePos = { x: prop.x, y: prop.y };
-        return;
-      }
-    }
-    // Free roam with money waiting: point at the nearest owned business
-    // whose till is worth the drive.
-    if (totalTill(state.business) >= 200) {
-      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-      const biz = nearestBusinessWithTill(state.business, px, py);
-      state.objectivePos = biz ? { x: biz.x, y: biz.y } : null;
-      return;
-    }
-    state.objectivePos = null;
-    return;
   }
-  const step = MISSION_DEFS[m.index].steps[m.step];
-  if (!step || step.kind === 'escape') { state.objectivePos = null; return; }
-  state.objectivePos = { x: step.x, y: step.y };
+  return loaded;
 }
 
-function updateTime(dt) {
-  // The weather module owns the clock now: it advances the hour, flips
-  // night, and rolls the weather dice. state.time stays the old shape
-  // ({ hour, isNight, raining }) so driving and police keep reading it.
-  const events = stepWeather(state.weather, dt, random);
-  state.time = weatherAsTime(state.weather);
-  for (const event of events) showMessage(state.missions, event, 3);
-  // The day/night cycle follows the same clock and books dynamic events
-  // — heat waves, fog banks, storm surges — on its own schedule.
-  for (const event of stepDayNight(state.daynight, state.weather, dt, random)) {
-    showMessage(state.missions, event, 3);
+function updateGameplay(G, modules, dt) {
+  // Spec update order: input -> player -> vehicles -> traffic -> peds ->
+  // police -> missions -> combat -> activities -> world -> render -> hud.
+  // input.update clears edge presses, so it runs first.
+  input.update(G, dt);
+  const order = ['player', 'vehicles', 'traffic', 'peds', 'police', 'missions', 'combat', 'activities'];
+  for (const name of order) {
+    const mod = modules[name];
+    if (mod && typeof mod.update === 'function') {
+      try { mod.update(G, dt); } catch (e) { console.error(`[main] ${name}.update`, e); }
+    }
   }
-}
-
-function stepWorld(dt, input) {
-  const events = { stolenCar: state.pendingSteal };
-  state.pendingSteal = false;
-  state.elapsed += dt;
-  updateTime(dt);
-  const player = state.player;
-
-  if (player.inCar) {
-    const car = player.inCar;
-    stepDrivenCar(car, input, dt, city, [...state.parkedCars, ...state.traffic, ...state.police.cars], state.time);
-    state.skidCooldown -= dt;
-    if (car.drifting && state.skidCooldown <= 0) {
-      state.skidCooldown = 0.35;
-      audio.skid();
-    }
-    // Horn (held): toot, and startle nearby traffic into a burst of speed.
-    state.hornCooldown -= dt;
-    if (input.horn() && state.hornCooldown <= 0) {
-      state.hornCooldown = 0.8;
-      audio.horn();
-      startleTraffic(state.traffic, car.x, car.y, 260);
-    }
-    // Near-miss bonus: flashing past a traffic car at speed pays $25.
-    state.nearMissCooldown -= dt;
-    if (Math.abs(car.speed) > 300 && state.nearMissCooldown <= 0) {
-      for (const other of state.traffic) {
-        const d = Math.hypot(other.x - car.x, other.y - car.y);
-        if (d > 46 && d < 72) {
-          state.nearMissCooldown = 3;
-          state.stats.nearMiss += 1;
-          player.money += 25;
-          state.stats.earned += 25;
-          audio.pickup();
-          pushFeed(state, 'Near miss  +$25');
-          showMessage(state.missions, 'Near miss! +$25', 2);
-          break;
-        }
-      }
-    }
-    // Running over a pedestrian at speed draws the law.
-    for (const ped of state.peds) {
-      if (Math.hypot(ped.x - car.x, ped.y - car.y) < 34 && Math.abs(car.speed) > 140) {
-        ped.fleeing = true;
-        ped.fleeTimer = 5;
-        addWanted(state, 1);
-        audio.crash();
-      }
-    }
-    if (car.health <= 0) {
-      state.wasted = true;
-      player.health = 0;
-    }
+  world.update(G, dt);
+  render.update(G, dt);
+  const hudMod = modules.hud;
+  if (hudMod && typeof hudMod.update === 'function') {
+    try { hudMod.update(G, dt); } catch (e) { console.error('[main] hud.update', e); }
   } else {
-    stepPlayer(player, input, dt, city);
+    fallbackHud(G);
   }
-  for (const car of state.traffic) stepTrafficCar(car, dt, random, [...state.traffic, ...state.police.cars, ...(state.player.inCar ? [state.player.inCar] : [])]);
-  for (const ped of state.peds) stepPedestrian(ped, dt, random, city, player);
-  stepPolice(state.police, state, dt, random);
-  stepMissions(state.missions, state, dt, events);
-  stepMissions2(state.missions2, state, dt, events);
-  stepMissions3(state.missions3, state, dt, events);
-  stepMissions4(state.missions4, state, dt, events);
-  stepMissions5(state.missions5, state, dt, events);
-  stepSmuggling(state.smuggling, state, dt);
-  stepDealership(state.dealership, state, dt, random);
-  stepTuning(state, dt, input);
-  stepCasino(state, dt);
-  stepWeapons(state.weapons, state, dt);
-  collectWeaponPickups(state);
-  stepMinigames(state.minigames, state, dt, random);
-  stepRadio(state.radio, dt, random);
-  // League rounds are recorded from a snapshot: finishRace clears the
-  // rivals, so the finishing order has to be captured before the step.
-  const raceWasActive = state.race.active;
-  const raceCircuit = state.race.circuitIndex;
-  const raceRivals = state.race.rivals.map((r) => ({ ...r }));
-  stepRace(state.race, state, dt, random);
-  if (raceWasActive && !state.race.active && state.race.playerPlace > 0 && isLeagueRound(state.league, raceCircuit)) {
-    // finishRace leaves the final time on race.timer; the rivals come
-    // from the snapshot taken before the step cleared them.
-    const results = buildLeagueResults({ rivals: raceRivals }, state.race.timer);
-    const report = recordLeagueRace(state.league, raceCircuit, results, state);
-    if (report && report.champion) {
-      pushFeed(state, `League season ${report.season} champion: ${report.champion}`);
-      saveGame();
-    }
-  }
-  stepTaxi(state.missions, state, dt);
-  stepBusinesses(state.business, state, dt);
-  stepProperties(state.properties, state, dt);
-  stepTrafficSystem(state.trafficAI, state.traffic, dt, random, state);
-  // Heat: the precinct remembers where the crime happened. A rising
-  // wanted level heats the district Rico is standing in.
-  if (state.wanted > state.prevWanted) addHeatForStars(state.heat, state, state.wanted - state.prevWanted);
-  state.prevWanted = state.wanted;
-  stepHeat(state.heat, state, dt);
-  updateObjectivePos();
-
-  // Hidden packages: walk or drive over one to collect it ($100 each).
-  for (const p of state.city.packages) {
-    if (p.taken) continue;
-    const px = player.inCar ? player.inCar.x : player.x;
-    const py = player.inCar ? player.inCar.y : player.y;
-    if (Math.hypot(p.x - px, p.y - py) < 30) {
-      p.taken = true;
-      state.missions.packagesFound += 1;
-      player.money += 100;
-      audio.pickup();
-      showMessage(state.missions, `Hidden package found! ${state.missions.packagesFound}/12  +$100`, 3);
-      saveGame();
-    }
-  }
-  if (state.missions.done) {
-    state.missionsDone = Math.max(state.missionsDone, state.missions.index);
-    state.missions.done = false;
-    audio.fanfare();
-    saveGame();
-  }
-  if (state.missions2.done) {
-    state.missionsDone = Math.max(state.missionsDone, 7 + state.missions2.index);
-    state.missions2.done = false;
-    audio.fanfare();
-    saveGame();
-  }
-  if (state.missions3.done) {
-    state.missionsDone = Math.max(state.missionsDone, 10 + state.missions3.index);
-    state.missions3.done = false;
-    audio.fanfare();
-    saveGame();
-  }
-  if (state.missions4.done) {
-    state.missionsDone = Math.max(state.missionsDone, 13 + state.missions4.index);
-    state.missions4.done = false;
-    audio.fanfare();
-    saveGame();
-  }
-  if (state.missions5.done) {
-    state.missionsDone = Math.max(state.missionsDone, 16 + state.missions5.index);
-    state.missions5.done = false;
-    audio.fanfare();
-    saveGame();
-  }
-  // Standing in the hospital zone patches Rico up for free, slowly.
-  if (!player.inCar && nearSite('hospital', player.x, player.y) && player.health < 100) {
-    player.health = Math.min(100, player.health + 6 * dt);
-  }
-  if (state.busted) {
-    state.bailCost = 150;
-    player.money = Math.max(0, player.money - state.bailCost);
-    clearWanted(state, state.police);
-    state.missions.taxi.active = false;
-    // A bust ends the smuggling run and breaks the streak — the crate is gone.
-    breakSmugglingStreak(state, 'Busted — the crate is gone and the streak with it.');
-    state.race.active = false;
-    state.race.rivals = [];
-    player.x = 600;
-    player.y = 320;
-    if (player.inCar) { player.inCar.driver = null; player.inCar = null; }
-    player.health = 100;
-    state.busted = false;
-    state.wasted = false;
-    return 'busted';
-  }
-  if (state.wasted) return 'wasted';
-  state.saveTimer += dt;
-  if (state.saveTimer > 10) { state.saveTimer = 0; saveGame(); }
-  audio.setEngine(player.inCar ? player.inCar.speed : 0, !!player.inCar);
-  audio.siren(state.police.cars.length > 0);
-  audio.setHeli(!!state.police.heli);
-  return null;
+  audio.update(G, dt);
+  save.update(G, dt);
+  shots.update(G, dt);
 }
 
-function runShot(name) {
-  const scene = stageShot(name, state, random);
-  let painted = 0;
-  function paint() {
-    renderer.draw(state, scene.screen, 0);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
+async function boot() {
+  const seed = parseSeed();
+  const rng = createRng(seed);
 
-function runGame() {
-  loadGame();
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let accumulator = 0;
+  // ---- Shared game object G ---------------------------------------------
+  const G = {
+    cfg,
+    rng,
+    seed: rng.seed,
+    scene: null,
+    camera: null,
+    renderer: null,
+    input: null,
+    audio: null,
+    save: null,
+    world: null,
+    player: defaultPlayer(),
+    vehicles: null,
+    traffic: null,
+    peds: null,
+    police: null,
+    missions: null,
+    combat: null,
+    hud: null,
+    activities: null,
+    story: null,
+    state: 'menu', // 'menu' | 'playing' | 'paused' | 'busted' | 'wasted'
+    time: { t: 0, dayTime: cfg.START_DAY_TIME },
+    events: createEvents(),
+    shotMode: false,
+    shot: null,
+    pausedFrom: null,
+  };
+  window.__MERIDIAN__ = G;
+
+  // ---- Engine modules (static) ------------------------------------------
+  render.init(G);
+  world.init(G);
+  input.init(G);
+  audio.init(G);
+  save.init(G);
+
+  // Restore a save if one exists (player position/money/missions).
+  const saved = G.save.load();
+  if (saved) {
+    G.player.money = saved.money;
+    G.player.health = saved.health;
+  }
+
+  // ---- Gameplay modules (dynamic, Builder B) ----------------------------
+  const modules = await loadGameplayModules(G);
+  G.modules = modules;
+
+  // ---- Screenshot staging (after gameplay modules, so it can use them) ---
+  shots.init(G);
+
+  // ---- State machine -----------------------------------------------------
+  function setState(next, payload) {
+    const prev = G.state;
+    G.state = next;
+    G.events.emit('state', { from: prev, to: next, payload });
+    if (next === 'playing') {
+      showOnly(null);
+      if (G.render) G.render.setCameraMode('follow');
+    } else if (next === 'menu') {
+      showOnly('menu');
+      if (G.render) G.render.setCameraMode('orbit');
+    } else if (next === 'paused') {
+      showOnly('pause-menu');
+    } else if (next === 'busted' || next === 'wasted') {
+      const title = $('end-title');
+      if (title) title.textContent = next === 'busted' ? 'BUSTED!' : 'WASTED';
+      const sub = $('end-subtitle');
+      if (sub) {
+        sub.textContent = next === 'busted'
+          ? 'The Meridian PD caught up with Rook.'
+          : 'Rook went down in Port Meridian.';
+      }
+      showOnly('end-screen');
+      if (G.audio) G.audio.play('missionFail');
+    }
+  }
+  G.setState = setState;
+
+  function startGame(fresh) {
+    if (fresh) {
+      const p = defaultPlayer();
+      G.player.x = p.x; G.player.z = p.z; G.player.heading = p.heading;
+      G.player.health = cfg.PLAYER.maxHealth;
+      G.player.money = cfg.START_MONEY;
+      G.player.inVehicle = false;
+      G.player.vehicle = null;
+      if (G.missions && typeof G.missions.reset === 'function') G.missions.reset();
+      if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(0);
+      G.time.dayTime = cfg.START_DAY_TIME;
+    }
+    if (G.audio) G.audio.uiClick();
+    setState('playing');
+  }
+  G.startGame = startGame;
+
+  G.events.on('busted', () => setState('busted'));
+  G.events.on('wasted', () => setState('wasted'));
+  G.events.on('mission-complete', () => {
+    if (G.audio) G.audio.play('missionComplete');
+  });
+  G.events.on('mission-failed', () => {
+    if (G.audio) G.audio.play('missionFail');
+  });
+
+  // ---- Menu wiring --------------------------------------------------------
+  const startBtn = $('start-button');
+  if (startBtn) startBtn.addEventListener('click', () => startGame(true));
+  const continueBtn = $('continue-button');
+  if (continueBtn) {
+    continueBtn.classList.toggle('hidden', !G.save.hasSave());
+    continueBtn.addEventListener('click', () => startGame(false));
+  }
+  const resumeBtn = $('resume-button');
+  if (resumeBtn) resumeBtn.addEventListener('click', () => setState('playing'));
+  const restartBtn = $('restart-button');
+  if (restartBtn) restartBtn.addEventListener('click', () => startGame(true));
+  const quitBtn = $('quit-button');
+  if (quitBtn) quitBtn.addEventListener('click', () => setState('menu'));
+  const retryBtn = $('retry-button');
+  if (retryBtn) {
+    retryBtn.addEventListener('click', () => {
+      G.player.health = cfg.PLAYER.maxHealth;
+      if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(0);
+      const s = G.world.spawns.garage;
+      G.player.x = s.x; G.player.z = s.z; G.player.heading = s.heading;
+      setState('playing');
+    });
+  }
+  const endMenuBtn = $('end-menu-button');
+  if (endMenuBtn) endMenuBtn.addEventListener('click', () => setState('menu'));
+  const muteBtn = $('mute-button');
+  if (muteBtn) {
+    muteBtn.addEventListener('click', () => {
+      const m = !G.audio.isMuted();
+      G.audio.setMuted(m);
+      muteBtn.textContent = m ? '🔇 Sound: Off' : '🔊 Sound: On';
+    });
+  }
+
+  // ---- Main loop ----------------------------------------------------------
   let last = performance.now();
-
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    audio.unlock();
-    audio.click();
-    state.wasted = false;
-    state.busted = false;
-    if (state.player.health <= 0) state.player.health = 100;
-    screen = SCREEN_PLAY;
-    announce(`Playing in Palmetto Bay. ${objectiveText(state.missions)}`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_MUTE) {
-      const muted = audio.toggleMute();
-      announce(muted ? 'Sound muted.' : 'Sound on.');
-    }
-    // The help overlay (play screen only) eats every key except H / P to close.
-    if (state.helpOpen && screen === SCREEN_PLAY) {
-      if (actions & (ACTION_HELP | ACTION_PAUSE)) {
-        state.helpOpen = false;
-        announce('Playing.');
-      }
-      return;
-    }
-    if ((actions & ACTION_HELP) && screen === SCREEN_PLAY) {
-      state.helpOpen = true;
-      announce('Help open. Press H to close.');
-      return;
-    }
-    if (screen === SCREEN_TITLE || screen === SCREEN_OVER || screen === SCREEN_BUSTED) {
-      if (actions & ACTION_CONFIRM) startGame();
-      return;
-    }
-    if (screen === SCREEN_PAUSED) {
-      if (actions & (ACTION_PAUSE | ACTION_CONFIRM)) { screen = SCREEN_PLAY; announce('Playing.'); }
-      return;
-    }
-    if (actions & ACTION_PAUSE) {
-      screen = SCREEN_PAUSED;
-      saveGame();
-      announce('Paused.');
-      return;
-    }
-    if (actions & ACTION_MISSION) {
-      const m = state.missions;
-      if (!m.active && m.index < MISSION_DEFS.length) {
-        startMission(m, m.index);
-        audio.click();
-        announce(`${MISSION_DEFS[m.index].title} started.`);
-      } else if (m.failed) {
-        startMission(m, m.index);
-        announce('Mission restarted.');
-      } else if (!m.active && m.index >= MISSION_DEFS.length) {
-        // First story done: M opens the second arc (missions 8-10).
-        const m2 = state.missions2;
-        if (!m2.active && m2.index < MISSION2_DEFS.length) {
-          const whyNot = canStartMission2(state, m2.index);
-          if (whyNot) {
-            showMessage(m, whyNot, 4);
-          } else {
-            startMission2(m2, m2.index);
-            audio.click();
-            announce(`${MISSION2_DEFS[m2.index].title} started.`);
-          }
-        } else if (m2.failed) {
-          startMission2(m2, m2.index);
-          announce('Mission restarted.');
-        } else if (!m2.active && m2.index >= MISSION2_DEFS.length) {
-          // Second arc done: M opens the third arc (missions 11-13).
-          const m3 = state.missions3;
-          if (!m3.active && m3.index < MISSION3_DEFS.length) {
-            const whyNot = canStartMission3(state, m3.index);
-            if (whyNot) {
-              showMessage(m, whyNot, 4);
-            } else {
-              startMission3(m3, m3.index);
-              audio.click();
-              announce(`${MISSION3_DEFS[m3.index].title} started.`);
-            }
-          } else if (m3.failed) {
-            startMission3(m3, m3.index);
-            announce('Mission restarted.');
-          } else if (!m3.active && m3.index >= MISSION3_DEFS.length) {
-            // Third arc done: M opens the fourth arc (missions 14-16).
-            const m4 = state.missions4;
-            if (!m4.active && m4.index < MISSION4_DEFS.length) {
-              const whyNot = canStartMission4(state, m4.index);
-              if (whyNot) {
-                showMessage(m, whyNot, 4);
-              } else {
-                startMission4(m4, m4.index);
-                audio.click();
-                announce(`${MISSION4_DEFS[m4.index].title} started.`);
-              }
-            } else if (m4.failed) {
-              startMission4(m4, m4.index);
-              announce('Mission restarted.');
-            } else if (!m4.active && m4.index >= MISSION4_DEFS.length) {
-              // Fourth arc done: M opens the fifth arc (missions 17-20).
-              const m5 = state.missions5;
-              if (!m5.active && m5.index < MISSION5_DEFS.length) {
-                const whyNot = canStartMission5(state, m5.index);
-                if (whyNot) {
-                  showMessage(m, whyNot, 4);
-                } else {
-                  startMission5(m5, m5.index);
-                  audio.click();
-                  announce(`${MISSION5_DEFS[m5.index].title} started.`);
-                }
-              } else if (m5.failed) {
-                startMission5(m5, m5.index);
-                announce('Mission restarted.');
-              }
-            }
-          }
-        }
-      }
-    }
-    if (actions & ACTION_SMUGGLING) {
-      // Z at the Dockside Pier starts a crate run; Z mid-run reminds Rico
-      // where the crate has to go. The run itself pays on delivery.
-      if (state.smuggling.active) {
-        const drop = smugglingObjective(state.smuggling);
-        showMessage(state.missions, state.smuggling.phase === 'pickup'
-          ? 'Pick up the crate at the Dockside Pier.'
-          : `Run the crate to the drop — ${Math.ceil(state.smuggling.timer)}s left.`, 3);
-        if (drop) state.objectivePos = { x: drop.x, y: drop.y };
-      } else {
-        const drop = startSmugglingRun(state, random);
-        if (drop) {
-          audio.click();
-          pushFeed(state, `Crate job started — deliver to the ${drop.name}`);
-        }
-      }
-    }
-    if (actions & ACTION_DEALERSHIP) {
-      // O at Bay Auto Mall: on foot it buys the featured car off the lot,
-      // from the driver's seat it trades the car in against the featured
-      // one. Anywhere else it names the featured car and its price.
-      const featured = featuredCar(state.dealership);
-      if (!featured) {
-        showMessage(state.missions, 'Bay Auto Mall is on the Harbor road. Drive there and press O.', 4);
-      } else {
-        const featuredPrice = featured.price;
-        const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-        const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-        if (Math.hypot(1500 - px, 1900 - py) > 150) {
-          showMessage(state.missions, `Bay Auto Mall is on the Harbor road — today's featured car is the ${featured.model} for $${featuredPrice}. Drive there and press O.`, 5);
-        } else if (state.player.inCar) {
-          const report = tradeInCar(state, featured.id, random);
-          if (report) {
-            audio.click();
-            pushFeed(state, `Traded in for the ${report.bought}  ${report.paid >= 0 ? `-$${report.paid}` : `+$${-report.paid}`}`);
-            saveGame();
-          }
-        } else {
-          const car = buyDealershipCar(state, featured.id, random);
-          if (car) {
-            audio.pickup();
-            pushFeed(state, `Bought the ${car.model}  -$${featuredPrice}`);
-            saveGame();
-          }
-        }
-      }
-    }
-    if (actions & ACTION_RACE) {
-      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-      const circuit = nearestCircuit(px, py);
-      if (state.race.active) {
-        showMessage(state.missions, 'You are already racing — reach the last checkpoint!', 3);
-      } else if (circuit < 0) {
-        const names = RACE_CIRCUITS.map((c) => c.name).join(', ');
-        showMessage(state.missions, `Races start at the checkered flags — ${names}. Drive to one and press R.`, 5);
-      } else {
-        const whyNot = canStartRace(state, circuit);
-        if (whyNot) {
-          showMessage(state.missions, whyNot, 4);
-        } else {
-          const fee = RACE_CIRCUITS[circuit].entryFee;
-          if (startRace(state.race, state, circuit, random)) {
-            pushFeed(state, `Entered ${RACE_CIRCUITS[circuit].name}  -$${fee}`);
-            audio.click();
-          }
-        }
-      }
-    }
-    if (actions & ACTION_TAXI) {
-      if (!state.missions.taxi.active) {
-        startTaxi(state.missions, state, random);
-        audio.click();
-      } else {
-        showMessage(state.missions, 'You already have a fare — finish it first.', 3);
-      }
-    }
-    if (actions & ACTION_BUSINESS) {
-      // Buy a business at its front door, or collect the takings from one
-      // Rico already owns. Each business keeps its own till, so Rico
-      // collects them one stop at a time.
-      const px = state.player.inCar ? state.player.inCar.x : state.player.x;
-      const py = state.player.inCar ? state.player.inCar.y : state.player.y;
-      const biz = nearestBusiness(px, py);
-      if (!biz) {
-        // No business here — maybe a property: buy it, or collect its rent.
-        const prop = nearestProperty(px, py);
-        if (!prop) {
-          const names = BUSINESS_DEFS.map((b) => b.name).join(', ');
-          showMessage(state.missions, `Businesses for sale: ${names}. Stand at one's front door and press B.`, 5);
-        } else if (state.properties.owned[prop.id]) {
-          const amount = collectRent(state, prop.id);
-          if (amount > 0) {
-            audio.pickup();
-            pushFeed(state, `Collected ${prop.name} rent  +$${amount}`);
-            showMessage(state.missions, `Collected $${amount} rent from the ${prop.name}.`, 4);
-            saveGame();
-          } else {
-            showMessage(state.missions, `The ${prop.name} rent till is empty — rent pays every minute.`, 3);
-          }
-        } else {
-          const whyNot = canBuyProperty(state, prop.id);
-          if (whyNot) {
-            showMessage(state.missions, whyNot, 4);
-          } else if (buyProperty(state, prop.id)) {
-            audio.fanfare();
-            pushFeed(state, `Bought the ${prop.name}  -$${prop.price}`);
-            showMessage(state.missions, `You own the ${prop.name} now — it earns rent every minute. Press B here to collect.`, 5);
-            saveGame();
-          }
-        }
-      } else if (state.business.owned[biz.id]) {
-        const amount = collectBusiness(state, biz.id);
-        if (amount > 0) {
-          audio.pickup();
-          pushFeed(state, `Collected ${biz.name} takings  +$${amount}`);
-          showMessage(state.missions, `Collected $${amount} from the ${biz.name}.`, 4);
-          saveGame();
-        } else {
-          showMessage(state.missions, `The ${biz.name} till is empty — it pays every minute.`, 3);
-        }
-      } else {
-        const whyNot = canBuyBusiness(state, biz.id);
-        if (whyNot) {
-          showMessage(state.missions, whyNot, 4);
-        } else if (buyBusiness(state, biz.id)) {
-          audio.fanfare();
-          pushFeed(state, `Bought the ${biz.name}  -$${biz.price}`);
-          showMessage(state.missions, `You own the ${biz.name} now — it earns $${biz.income} a minute. Press B here to collect.`, 5);
-          saveGame();
-        }
-      }
-    }
-    if (actions & ACTION_TUNE) {
-      // Tuning at Marina Garage: U buys the next upgrade in the build
-      // order for the car Rico is sitting in.
-      const bought = buyNextUpgrade(state);
-      if (bought) {
-        audio.click();
-        pushFeed(state, `${bought.name} fitted  -$${bought.price}`);
-        saveGame();
-      }
-    }
-    if (actions & ACTION_CASINO_SLOTS) {
-      const report = spinSlots(state, random);
-      if (report && report.payout > 0) {
-        audio.pickup();
-        pushFeed(state, `Slots win  +$${report.payout}`);
-        saveGame();
-      } else if (report) {
-        saveGame();
-      }
-    }
-    if (actions & ACTION_CASINO_BLACKJACK) {
-      const report = playBlackjack(state, random);
-      if (report && report.payout > 0) {
-        audio.pickup();
-        pushFeed(state, `Blackjack win  +$${report.payout}`);
-        saveGame();
-      } else if (report) {
-        saveGame();
-      }
-    }
-    if (actions & ACTION_CASINO_ROULETTE) {
-      const report = playRoulette(state, random, 'red');
-      if (report && report.payout > 0) {
-        audio.pickup();
-        pushFeed(state, `Roulette win  +$${report.payout}`);
-        saveGame();
-      } else if (report) {
-        saveGame();
-      }
-    }
-    if (actions & ACTION_REPAIR) {
-      const player = state.player;
-      if (player.inCar && nearSite('garage', player.inCar.x, player.inCar.y)) {
-        if (player.inCar.health >= 100) {
-          showMessage(state.missions, 'This car is already in perfect shape.', 2);
-        } else if (player.money < REPAIR_COST) {
-          showMessage(state.missions, `Repairs cost $${REPAIR_COST} — you cannot afford it yet.`, 3);
-        } else {
-          player.money -= REPAIR_COST;
-          player.inCar.health = 100;
-          audio.repair();
-          pushFeed(state, `Car repaired  -$${REPAIR_COST}`);
-          showMessage(state.missions, 'Marina Garage patched the car up — good as new.', 3);
-        }
-      } else if (!player.inCar && nearSite('hospital', player.x, player.y)) {
-        if (player.health >= 100) {
-          showMessage(state.missions, 'You are already at full health.', 2);
-        } else if (player.money < HEAL_COST) {
-          showMessage(state.missions, `Treatment costs $${HEAL_COST} — you cannot afford it yet.`, 3);
-        } else {
-          player.money -= HEAL_COST;
-          player.health = 100;
-          audio.repair();
-          pushFeed(state, `Patched up at Bay General  -$${HEAL_COST}`);
-          showMessage(state.missions, 'Bay General patched you up — full health.', 3);
-        }
-      } else if (state.wanted > 0) {
-        // Nowhere to repair — but a bent cop will take cash to knock a
-        // star off. G pays the bribe when Rico is wanted.
-        const report = payBribe(state, state.heat);
-        if (report.ok) {
-          audio.click();
-          pushFeed(state, `Bribe paid  -$${report.cost} — wanted now ${report.stars} star${report.stars === 1 ? '' : 's'}`);
-          saveGame();
-        } else {
-          showMessage(state.missions, report.reason, 4);
-        }
-      } else {
-        showMessage(state.missions, 'Repairs happen at Marina Garage; healing at Bay General.', 3);
-      }
-    }
-    if (actions & ACTION_ENTER) {
-      const player = state.player;
-      if (player.inCar) {
-        exitCar(player);
-      } else {
-        const car = nearestCar(player, state.parkedCars, 70);
-        if (car) {
-          const result = enterCar(player, car);
-          audio.click();
-          if (result === 'stolen') {
-            state.pendingSteal = true;
-            addWanted(state, 1);
-            pushFeed(state, `Stole the ${car.model} — wanted level up`);
-            showMessage(state.missions, `You took the ${car.model} — the law noticed.`, 3);
-          }
-        }
-      }
-    }
-    if (actions & ACTION_PUNCH) {
-      // On foot with a gun equipped, Q fires the gun instead of punching —
-      // fists are what Q means when Rico is unarmed.
-      if (!state.player.inCar && state.weapons.equipped && canShoot(state.weapons)) {
-        const report = shootFromPlayer(state, random);
-        if (report.fired && report.hits > 0) addWanted(state, 1);
-        else if (report.fired) showMessage(state.missions, 'Shot fired — the street heard that.', 2);
-        else if (report.reason === 'magazine empty') showMessage(state.missions, 'Magazine empty — reloading.', 2);
-        return;
-      }
-      const hit = punch(state.player, state.peds);
-      if (hit && !hit.bodyguard) {
-        audio.punch();
-        addWanted(state, 1);
-        showMessage(state.missions, 'That pedestrian is calling the police!', 3);
-      } else if (hit) {
-        // Punching a bodyguard is part of the job, not a street crime — the
-        // kingpin's crew does not call the cops on itself.
-        audio.punch();
-      }
-    }
-  }
-
-  function step() {
-    if (screen !== SCREEN_PLAY) return;
-    const result = stepWorld(STEP, input);
-    if (result === 'wasted') {
-      screen = SCREEN_OVER;
-      audio.sting();
-      saveGame();
-      announce('Wasted. Press Space to get back up.');
-    } else if (result === 'busted') {
-      screen = SCREEN_BUSTED;
-      audio.sting();
-      saveGame();
-      announce('Busted. Press Space to walk free.');
-    }
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    renderer.setZoom(input.zoomLevel());
-    if (screen === SCREEN_TITLE) {
-      // The title backdrop lives: traffic cruises while the player reads.
-      state.elapsed += STEP;
-      for (const car of state.traffic) stepTrafficCar(car, STEP, random);
-      accumulator = 0;
-    } else if (screen === SCREEN_PLAY) {
-      // The help overlay freezes the world while Rico reads it.
-      if (state.helpOpen) {
-        accumulator = 0;
-      } else {
-        while (accumulator >= STEP) {
-          step();
-          accumulator -= STEP;
-          if (screen !== SCREEN_PLAY) { accumulator = 0; break; }
-        }
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(state, screen, state.player.money);
-  }
+  let pausedByHidden = false;
+  // FPS guard: if the machine struggles, drop render resolution instead of
+  // stuttering. Steps down 2 -> 1.5 -> 1.25 -> 1, at most once per 5 s.
+  let fpsEma = 60;
+  let fpsCheckTimer = 0;
+  const pixelSteps = [2, 1.5, 1.25, 1];
+  let pixelStep = 0;
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      saveGame();
-      announce('Paused.');
+    if (document.hidden && G.state === 'playing') {
+      pausedByHidden = true;
+      setState('paused');
+    } else if (!document.hidden && pausedByHidden) {
+      pausedByHidden = false;
     }
   });
 
-  announce('Palmetto Bay Heat. Press Space or click to start.');
+  function frame(now) {
+    requestAnimationFrame(frame);
+    let dt = (now - last) / 1000;
+    last = now;
+    if (!Number.isFinite(dt) || dt < 0) dt = 0;
+    dt = Math.min(dt, 0.05); // clamp tab-switch spikes
+
+    // FPS guard: track a smoothed frame rate and step the pixel ratio down
+    // when the game cannot hold ~28 fps.
+    if (dt > 0) fpsEma = fpsEma * 0.95 + (1 / dt) * 0.05;
+    fpsCheckTimer += dt;
+    if (fpsCheckTimer >= 5) {
+      fpsCheckTimer = 0;
+      if (fpsEma < 28 && pixelStep < pixelSteps.length - 1 && G.renderer) {
+        pixelStep += 1;
+        G.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, pixelSteps[pixelStep]));
+        console.info(`[main] fps ${fpsEma.toFixed(0)} — pixel ratio -> ${pixelSteps[pixelStep]}`);
+      }
+    }
+
+    // Pause toggle (Esc / P) — edge-triggered, checked before updates.
+    if (G.input && G.input.wasPressed(cfg.KEYS.pause)) {
+      if (G.state === 'playing') setState('paused');
+      else if (G.state === 'paused') setState('playing');
+    }
+    if (G.input && G.input.wasPressed('KeyP')) {
+      if (G.state === 'playing') setState('paused');
+      else if (G.state === 'paused') setState('playing');
+    }
+    // Enter starts the game from the menu.
+    if (G.state === 'menu' && G.input && G.input.wasPressed('Enter')) startGame(!G.save.hasSave());
+    // Radio toggle while playing.
+    if (G.state === 'playing' && G.input && G.input.wasPressed(cfg.KEYS.radio)) {
+      if (G.audio) {
+        const on = !G.audio.isRadioOn();
+        G.audio.setRadio(on);
+        if (on && G.hud && typeof G.hud.showMessage === 'function') {
+          G.hud.showMessage(`Radio: ${G.audio.currentStation()}`);
+        }
+      }
+    }
+
+    if (G.state === 'playing') {
+      updateGameplay(G, modules, dt);
+    } else if (G.state === 'menu') {
+      // Menu: keep the world alive behind the title (water, clock, orbit).
+      input.update(G, dt);
+      world.update(G, dt);
+      render.update(G, dt);
+    } else if (G.state === 'paused') {
+      // Frozen frame: render once so the pause menu sits over the scene.
+      input.update(G, dt);
+      render.update(G, 0);
+    } else {
+      // busted / wasted: frozen scene behind the end screen.
+      input.update(G, dt);
+      render.update(G, 0);
+    }
+  }
+
+  // If a screenshot preset staged the scene, the game is already playing.
+  if (!G.shotMode) setState('menu');
+  else showOnly(null);
+
   requestAnimationFrame(frame);
+  G.events.emit('booted', { seed: rng.seed, modules: Object.keys(modules).filter((k) => modules[k]) });
+  return G;
 }
 
-if (shot) runShot(shot);
-else runGame();
+boot().catch((e) => {
+  console.error('[main] boot failed', e);
+  const msg = $('message');
+  if (msg) {
+    msg.textContent = 'Failed to start Meridian Heat. Please reload the page.';
+    msg.classList.remove('hidden');
+  }
+});
+
+export default { boot };
