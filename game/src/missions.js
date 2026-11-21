@@ -1,646 +1,649 @@
-// missions.js — the 8 story missions of Meridian Heat. Each mission is a
-// small state machine (stage 0..n) driven by the world: waypoints, timers,
-// deliveries, kills, races. Owns G.missions. Progress (completed ids, money)
-// is persisted through G.save when available.
+// missions.js — the 8 story missions of Meridian Heat.
+//
+// Owns G.missions. The shape matches what main.js and save.js expect:
+//   done: Set of completed mission NUMBERS (1–8, config.js MISSIONS ids)
+//   current: number, 0 when no mission is active
+//   active: the running mission's runtime object (or null)
+// Rewards come from G.cfg.ECONOMY.MISSION_REWARDS when present. Money is
+// NEVER added here: completeMission emits 'mission-complete' and main.js
+// adds the reward to G.money (adding it here too would pay twice).
+//
+// Each mission is a small state machine (setup / update / objective).
+// Briefing text comes from G.story when story.js has been initialised,
+// with short fallbacks here. Waypoints are city positions: named landmarks
+// from G.world.landmarks when the world provides them, otherwise the
+// fallbacks in LANDMARKS (computed from the real grid: road centres at
+// -288..288 step 72, city half 294, harbour to z 424). A waypoint beacon
+// mesh is drawn only when the THREE global exists.
+//
+// Missions never import other gameplay modules: they read and write shared
+// state through G (player, police, combat, hud) and call the police module
+// through its G.police helpers.
 
-import * as configModule from './config.js';
-import * as randomModule from './random.js';
-
-const CFG = configModule.CONFIG ?? configModule.default ?? {};
-const mulberry32 = randomModule.mulberry32 ?? randomModule.default ?? null;
-
-// ---------------------------------------------------------------- helpers
-
-function cfg(G, key, fallback) {
-  const c = G.cfg ?? CFG;
-  const v = c == null ? undefined : c[key];
-  return v === undefined || v === null ? fallback : v;
-}
-
-/** A callable RNG from G.rng (the createRng bundle) or a fresh mulberry32. */
-function rngFn(G) {
-  const r = G.rng;
-  if (typeof r === 'function') return r;
-  if (r && typeof r.next === 'function') return r.next;
-  if (mulberry32) return mulberry32(G.seed ?? 7);
-  return Math.random;
-}
-
-function three() {
-  return typeof globalThis !== 'undefined' ? globalThis.THREE : undefined;
-}
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-function emit(G, name, data) {
-  try {
-    G.events?.emit?.(name, data);
-  } catch (e) { /* best-effort */ }
-}
-
-/** Map my sound names onto the audio module's real play() names. */
-const SOUND_MAP = {
-  hurt: 'crash', wasted: 'missionFail', door: 'doorSlam', steal: 'uiClick',
-  bump: 'crash', checkpoint: 'pickup', delivery: 'pickup', ambush: 'wantedUp',
-  cash: 'pickup', package: 'pickup', 'race-start': 'horn',
-  'race-win': 'missionComplete', 'race-lose': 'missionFail',
-  'mission-start': 'uiClick', 'mission-pass': 'missionComplete',
-  'mission-fail': 'missionFail', siren: 'wantedUp', busted: 'missionFail',
-  kill: 'pickup', 'shot-smg': 'shot', 'shot-enemy': 'shot', reload: 'reload',
-  crash: 'crash', shot: 'shot', engine: null, footstep: 'footstep',
-};
-
-function sfx(G, name) {
-  try {
-    const mapped = Object.prototype.hasOwnProperty.call(SOUND_MAP, name)
-      ? SOUND_MAP[name] : name;
-    if (mapped) G.audio?.play?.(mapped);
-  } catch (e) { /* audio is best-effort */ }
-}
-
-function dist2D(a, b) {
-  return Math.hypot(a.x - b.x, a.z - b.z);
-}
-
-function persist(G) {
-  try {
-    G.save?.save?.(G);
-  } catch (e) { /* best-effort */ }
-}
-
-// ---------------------------------------------------------------- pure data (tested)
-
-/** District anchors on the city map (x, z). Pure data. Aligned with the
- * world module's landmarks and spawn points so every waypoint is reachable
- * by road (garage doors sit just off a road; waypoints use the road side). */
-export const PLACES = {
-  marasGarage: { x: -18, z: 108, name: "Mara's Garage" },
-  garageRoad: { x: 0, z: 108, name: "Mara's Garage" },
-  harborDepot: { x: 300, z: -60, name: 'Harbor Depot' },
-  pier9: { x: 340, z: 30, name: 'Pier 9' },
-  downtown: { x: 0, z: 0, name: 'Downtown' },
-  meridianTower: { x: 0, z: -136, name: 'Meridian Tower' },
-  hillsWarehouse: { x: -216, z: -192, name: 'Hills Warehouse' },
-  beachfront: { x: 60, z: 300, name: 'Beachfront' },
-  harborLoop: { x: 144, z: 72, name: 'Harbor Loop' },
-};
-
-export const MISSION_DEFS = [
-  { id: 1, name: 'First Wheels', reward: 500, brief: 'Steal a car and bring it to Mara\'s garage.' },
-  { id: 2, name: 'Courier Run', reward: 800, timeLimit: 240, brief: 'Deliver 3 packages before the clock runs out.' },
-  { id: 3, name: 'Getaway', reward: 1200, timeLimit: 60, brief: 'Lose a 2-star wanted level for 60 seconds.' },
-  { id: 4, name: 'Rival Rumble', reward: 1500, brief: 'Clear the Kroll gunmen off Pier 9.' },
-  { id: 5, name: 'Midnight Race', reward: 2000, timeLimit: 180, brief: 'Win the 3-lap street race at the Harbor loop.' },
-  { id: 6, name: 'The Pickup', reward: 2500, brief: 'Pick up Mara, then run the ambush to the port.' },
-  { id: 7, name: 'Harbor Heist', reward: 4000, brief: 'Steal the courier truck and deliver it to the Hills warehouse.' },
-  { id: 8, name: 'King of Meridian', reward: 10000, brief: 'Beat Dante, lose the cops, finish it on the tower roof.' },
+export const MISSION_ORDER = [
+  'first-wheels',
+  'courier-run',
+  'getaway',
+  'rival-rumble',
+  'midnight-race',
+  'the-pickup',
+  'harbor-heist',
+  'king-of-meridian',
 ];
 
-/** Mission definition by id, or null. Pure. */
-export function defFor(id) {
-  return MISSION_DEFS.find((d) => d.id === id) ?? null;
+export const NUM_BY_ID = {
+  'first-wheels': 1,
+  'courier-run': 2,
+  getaway: 3,
+  'rival-rumble': 4,
+  'midnight-race': 5,
+  'the-pickup': 6,
+  'harbor-heist': 7,
+  'king-of-meridian': 8,
+};
+
+export const REWARDS = {
+  'first-wheels': 800,
+  'courier-run': 1200,
+  getaway: 1500,
+  'rival-rumble': 2000,
+  'midnight-race': 2500,
+  'the-pickup': 3000,
+  'harbor-heist': 5000,
+  'king-of-meridian': 10000,
+};
+
+// Mission id (number or slug) -> slug.
+export function missionSlug(id) {
+  if (typeof id === 'number') return MISSION_ORDER[id - 1] ?? null;
+  return MISSION_ORDER.includes(id) ? id : null;
 }
 
-/** Cash reward for a mission id. Pure. */
-export function rewardFor(id) {
-  return defFor(id)?.reward ?? 0;
+// Mission id (number or slug) -> number 1..8.
+export function missionNum(id) {
+  if (typeof id === 'number') return id >= 1 && id <= 8 ? id : null;
+  return NUM_BY_ID[id] ?? null;
 }
 
-/** Fresh runtime state for a mission id. Pure. */
-export function createMission(id) {
-  const def = defFor(id);
-  if (!def) return null;
-  return {
-    id,
-    name: def.name,
-    status: 'active', // 'active' | 'passed' | 'failed'
-    stage: 0,
-    timer: def.timeLimit ?? 0,
-    timerMax: def.timeLimit ?? 0,
-    waypoint: null,
-    objectives: [],
-    data: {},
-    failReason: null,
-    startedAt: 0,
-  };
+export function missionReward(G, id) {
+  const num = missionNum(id);
+  const cfg = G && G.cfg && G.cfg.ECONOMY && G.cfg.ECONOMY.MISSION_REWARDS;
+  if (num && Array.isArray(cfg) && typeof cfg[num - 1] === 'number') return cfg[num - 1];
+  return REWARDS[missionSlug(id)] ?? 0;
 }
 
-/** Is `pos` within `radius` of `target` (XZ plane)? Pure. */
-export function atWaypoint(pos, target, radius) {
-  if (!pos || !target) return false;
-  return dist2D(pos, target) <= radius;
-}
+// Fallback landmark positions (world units) when G.world.landmarks is
+// absent. Real landmarks (world.js): spawn/plaza (-42,-42), garage
+// (-134,120), pier (-60,334), tower (38,-120), beach (286,40),
+// harborGate (0,286), raceStart (-42,-258), warehouse (200,270).
+export const LANDMARKS = {
+  garage: { x: -134, z: 120, label: 'Mara\u2019s Garage' },
+  downtown: { x: -42, z: -42, label: 'Downtown' },
+  harbor: { x: 0, z: 286, label: 'Harbor' },
+  docks: { x: -60, z: 334, label: 'The Docks' },
+  beachfront: { x: 286, z: 40, label: 'Beachfront' },
+  hills: { x: -42, z: -258, label: 'The Hills' },
+  warehouse: { x: 200, z: 270, label: 'Warehouse' },
+  tower: { x: 38, z: -120, label: 'Meridian Tower' },
+};
 
-/**
- * Advance a checkpoint race: returns the new {lap, checkpoint} after the
- * player reaches `reachedIndex` (or unchanged when it is not the next one).
- * Pure.
- */
-export function advanceCheckpoint(race, reachedIndex) {
-  const total = race.checkpoints.length;
-  if (reachedIndex !== race.checkpoint) return race;
-  let { lap, checkpoint } = race;
-  checkpoint += 1;
-  if (checkpoint >= total) {
-    checkpoint = 0;
-    lap += 1;
+// My landmark names -> the world's real landmark names.
+const LANDMARK_MAP = {
+  garage: 'garage',
+  downtown: 'plaza',
+  harbor: 'harborGate',
+  docks: 'pier',
+  beachfront: 'beach',
+  hills: 'raceStart',
+  warehouse: 'warehouse',
+  tower: 'tower',
+};
+
+export function landmark(G, name) {
+  const world = G.world ?? {};
+  const real = LANDMARK_MAP[name];
+  if (real && world.landmarks && world.landmarks[real]) {
+    const p = world.landmarks[real];
+    return { x: p.x, z: p.z, label: (LANDMARKS[name] ?? {}).label ?? name };
   }
-  return { ...race, lap, checkpoint };
+  return LANDMARKS[name] ?? { x: 0, z: 0, label: name };
 }
 
-/** Has the race reached its final lap/checkpoint? Pure. */
-export function raceFinished(race, laps) {
-  return race.lap >= laps;
-}
-
-// ---------------------------------------------------------------- waypoint marker
-
-function buildMarker(G) {
-  const T = three();
-  if (!T) return null;
-  const geo = new T.CylinderGeometry(2.2, 2.2, 30, 12, 1, true);
-  const mat = new T.MeshBasicMaterial({
-    color: 0xffd23f, transparent: true, opacity: 0.28, side: T.DoubleSide, depthWrite: false,
-  });
-  const mesh = new T.Mesh(geo, mat);
-  mesh.position.y = 15;
-  mesh.visible = false;
-  G.scene?.add?.(mesh);
-  return mesh;
-}
-
-// ---------------------------------------------------------------- module
-
-export function init(G) {
-  const rng = rngFn(G);
-  G.missions = {
-    defs: MISSION_DEFS,
-    current: null,
-    currentIndex: 0,
-    completed: [],
-    unlocked: 1,
-    attempts: {},
-    _rng: rng,
-    _marker: null,
-    _raceRival: null,
-    _maraTimer: 0,
-
-    /** Fresh-game reset (menu "New Game"). */
-    reset() {
-      G.missions._cleanup();
-      G.missions.current = null;
-      G.missions.currentIndex = 0;
-      G.missions.completed = [];
-      G.missions.unlocked = 1;
-      G.missions.attempts = {};
-    },
-
-    /** Alias used by the screenshot stager: index 0 -> mission 1. */
-    start(index) {
-      return G.missions.startMission((index ?? 0) + 1);
-    },
-
-    /** The next mission the player can start (lowest incomplete id). */
-    nextAvailable() {
-      for (const d of MISSION_DEFS) {
-        if (!G.missions.completed.includes(d.id)) return d.id;
-      }
-      return null;
-    },
-
-    /** Can mission `id` be started right now? */
-    canStart(id) {
-      if (G.missions.current) return false;
-      if (G.missions.completed.includes(id)) return false;
-      return id <= G.missions.unlocked;
-    },
-
-    /** Start mission `id`. Returns the mission or null. */
-    startMission(id) {
-      if (!G.missions.canStart(id)) return null;
-      const m = createMission(id);
-      if (!m) return null;
-      m.startedAt = G.time ? G.time.t : 0;
-      G.missions.current = m;
-      G.missions.currentIndex = id - 1;
-      G.missions.attempts[id] = (G.missions.attempts[id] ?? 0) + 1;
-      G.missions._setup(id, m);
-      try {
-        G.story?.playLines?.(id, 'start');
-      } catch (e) { /* best-effort */ }
-      try {
-        G.hud?.banner?.(`${m.name} — ${defFor(id).brief}`, 5);
-      } catch (e) { /* best-effort */ }
-      emit(G, 'mission-started', { id, name: m.name });
-      sfx(G, 'mission-start');
-      return m;
-    },
-
-    /** Mark the current mission passed: reward, unlock, persist. */
-    passMission() {
-      const m = G.missions.current;
-      if (!m) return;
-      m.status = 'passed';
-      const reward = rewardFor(m.id);
-      if (G.player) G.player.money += reward;
-      if (!G.missions.completed.includes(m.id)) G.missions.completed.push(m.id);
-      G.missions.unlocked = Math.max(G.missions.unlocked, m.id + 1);
-      try {
-        G.story?.playLines?.(m.id, 'done');
-      } catch (e) { /* best-effort */ }
-      try {
-        G.hud?.banner?.(`Mission passed! +$${reward}`, 5);
-      } catch (e) { /* best-effort */ }
-      emit(G, 'mission-complete', { id: m.id, reward });
-      // The jingle plays in main.js on 'mission-complete'; do not play it
-      // here too, or it sounds twice.
-      G.missions._cleanup();
-      G.missions.current = null;
-      G.missions.currentIndex = m.id; // next mission index for the save
-      if (m.id === 8) {
-        emit(G, 'game-complete', { money: G.player?.money ?? 0 });
-        try {
-          G.hud?.showEnd?.(true);
-        } catch (e) { /* best-effort */ }
-      }
-      persist(G);
-    },
-
-    /** Mark the current mission failed with a reason. Retry stays open. */
-    failMission(reason) {
-      const m = G.missions.current;
-      if (!m) return;
-      m.status = 'failed';
-      m.failReason = reason;
-      try {
-        G.hud?.banner?.(`Mission failed: ${reason}`, 5);
-      } catch (e) { /* best-effort */ }
-      emit(G, 'mission-failed', { id: m.id, reason });
-      // The jingle plays in main.js on 'mission-failed'; do not play it
-      // here too, or it sounds twice.
-      G.missions._cleanup();
-      G.missions.current = null;
-      persist(G);
-    },
-
-    /** Called when the player is wasted or busted mid-mission. */
-    onPlayerDown(kind) {
-      if (!G.missions.current) return;
-      G.missions.failMission(kind === 'busted' ? 'Busted by the police' : 'Wasted');
-    },
-
-    /** Per-mission setup: waypoints, spawns, wanted levels. */
-    _setup(id, m) {
-      const P = PLACES;
-      if (id === 1) {
-        // A sedan waiting on the road by the Harbor for Rook to lift.
-        const car = G.vehicles.spawn({
-          x: 288, z: 144,
-          heading: Math.PI, kind: 'sedan', driver: 'none',
-        });
-        m.data.carId = car.id;
-        m.waypoint = { x: car.pos.x, z: car.pos.z };
-        m.objectives = ['Steal a car', "Drive it to Mara's garage"];
-      } else if (id === 2) {
-        m.data.drops = [
-          { x: 144, z: -144 },
-          { x: -144, z: 144 },
-          { x: -72, z: -216 },
-        ];
-        m.data.dropIndex = 0;
-        m.waypoint = { ...m.data.drops[0] };
-        m.objectives = ['Deliver the packages (0/3)', 'Beat the clock'];
-      } else if (id === 3) {
-        G.police?.addWanted?.(30, 'mission');
-        m.timer = 60;
-        m.timerMax = 60;
-        m.waypoint = null;
-        m.objectives = ['Survive the police for 60 seconds', 'Do not get busted'];
-      } else if (id === 4) {
-        m.waypoint = { ...P.pier9 };
-        m.objectives = ['Reach Pier 9', 'Clear the Kroll gunmen'];
-        m.data.spawned = false;
-      } else if (id === 5) {
-        const loop = [
-          { x: 144, z: 72 }, { x: 144, z: -72 }, { x: 72, z: -72 }, { x: 72, z: 72 },
-        ];
-        m.data.race = { checkpoints: loop, lap: 0, checkpoint: 0, laps: 3 };
-        m.waypoint = { ...loop[0] };
-        m.objectives = ['Win the midnight race (3 laps)', 'Hit every checkpoint'];
-        // Dante's driver: a rival car on the same loop, a touch slower.
-        const rival = G.vehicles.spawn({
-          x: 144, z: 90, heading: Math.PI, kind: 'coupe',
-          driver: 'rival', maxSpeed: 34, accel: 14,
-        });
-        m.data.rivalId = rival.id;
-        G.missions._raceRival = { vehicle: rival, checkpoint: 0, lap: 0, speed: 26 };
-      } else if (id === 6) {
-        m.waypoint = { ...P.garageRoad };
-        m.objectives = ['Pick up Mara at the garage'];
-        m.data.pickedUp = false;
-        m.data.ambushed = false;
-      } else if (id === 7) {
-        const truck = G.vehicles.spawn({
-          x: 288, z: -72,
-          heading: Math.PI / 2, kind: 'truck', driver: 'none',
-        });
-        m.data.truckId = truck.id;
-        m.waypoint = { x: truck.pos.x, z: truck.pos.z };
-        m.objectives = ['Steal the courier truck', 'Deliver it to the Hills warehouse'];
-      } else if (id === 8) {
-        const loop = [
-          { x: 72, z: 0 }, { x: 0, z: 72 }, { x: -72, z: 0 }, { x: 0, z: -72 },
-        ];
-        m.data.race = { checkpoints: loop, lap: 0, checkpoint: 0, laps: 1 };
-        m.waypoint = { ...loop[0] };
-        m.objectives = ['Beat Dante in the race', 'Then lose the cops'];
-        const dante = G.vehicles.spawn({
-          x: 72, z: 18, heading: Math.PI, kind: 'coupe',
-          driver: 'rival', maxSpeed: 36, accel: 15,
-        });
-        m.data.rivalId = dante.id;
-        G.missions._raceRival = { vehicle: dante, checkpoint: 0, lap: 0, speed: 28 };
-      }
-      G.missions._syncMarker();
-    },
-
-    /** Tear down mission spawns (rival cars become parked cars). */
-    _cleanup() {
-      if (G.missions._raceRival?.vehicle) {
-        const rv = G.missions._raceRival.vehicle;
-        rv.driver = 'none';
-        rv.ai = null;
-        rv.speed = 0;
-        G.missions._raceRival = null;
-      }
-      if (G.missions._marker) G.missions._marker.visible = false;
-      if (G.missions.current) G.missions.current.waypoint = null;
-    },
-
-    /** Move the 3D waypoint beam to the mission waypoint. */
-    _syncMarker() {
-      const m = G.missions.current;
-      if (!G.missions._marker) G.missions._marker = buildMarker(G);
-      const marker = G.missions._marker;
-      if (!marker) return;
-      if (m?.waypoint) {
-        marker.visible = true;
-        marker.position.x = m.waypoint.x;
-        marker.position.z = m.waypoint.z;
-      } else {
-        marker.visible = false;
-      }
-    },
-  };
-
-  return G.missions;
-}
-
-// ---------------------------------------------------------------- update
-
-function playerPos(G) {
-  const p = G.player;
-  if (!p) return null;
-  return p.inVehicle && p.vehicle ? p.vehicle.pos : p.pos;
-}
-
-function raceStep(G, m, dt) {
-  const race = m.data.race;
-  const pos = playerPos(G);
-  if (!race || !pos) return;
-  const cp = race.checkpoints[race.checkpoint];
-  if (cp && atWaypoint(pos, cp, 10)) {
-    const next = advanceCheckpoint(race, race.checkpoint);
-    m.data.race = next;
-    const total = race.checkpoints.length;
-    m.waypoint = { ...race.checkpoints[next.checkpoint] };
-    emit(G, 'checkpoint', { lap: next.lap + 1, checkpoint: next.checkpoint + 1, total });
-    sfx(G, 'checkpoint');
-    G.missions._syncMarker();
+export function randomRoadPos(G) {
+  if (G.world && typeof G.world.randomRoadPos === 'function') {
+    return G.world.randomRoadPos(G.rng);
   }
-  // Rival car follows the same checkpoints.
-  const rival = G.missions._raceRival;
-  if (rival?.vehicle) {
-    const rv = rival.vehicle;
-    const rcp = race.checkpoints[rival.checkpoint];
-    if (rcp) {
-      const dx = rcp.x - rv.pos.x;
-      const dz = rcp.z - rv.pos.z;
-      const d = Math.hypot(dx, dz);
-      const want = Math.atan2(dx, dz);
-      let dh = want - rv.heading;
-      while (dh > Math.PI) dh -= Math.PI * 2;
-      while (dh < -Math.PI) dh += Math.PI * 2;
-      rv.ai = {
-        throttle: d > 4 ? 0.85 : 0.4,
-        steer: clamp(dh * 2.4, -1, 1),
-      };
-      rv.speed = Math.min(rv.speed, rival.speed);
-      if (d < 10) {
-        rival.checkpoint += 1;
-        if (rival.checkpoint >= race.checkpoints.length) {
-          rival.checkpoint = 0;
-          rival.lap += 1;
+  const r = () => (G.rng && typeof G.rng.next === 'function' ? G.rng.next() : Math.random());
+  return { x: (r() - 0.5) * 400, z: (r() - 0.5) * 400 };
+}
+
+// --- waypoint helpers ----------------------------------------------------
+
+export function waypointReached(pos, wp, radius) {
+  if (!wp) return false;
+  return Math.hypot(pos.x - wp.x, pos.z - wp.z) <= (radius ?? wp.radius ?? 14);
+}
+
+export function setWaypoint(m, x, z, label, radius) {
+  m.data.waypoint = { x, z, label, radius: radius ?? 14 };
+}
+
+export function clearWaypoint(m) {
+  m.data.waypoint = null;
+}
+
+// Race helper: advance the checkpoint index; returns { lap, cp, done }.
+export function advanceCheckpoint(m, totalCp, totalLaps) {
+  m.data.cp += 1;
+  if (m.data.cp >= totalCp) {
+    m.data.cp = 0;
+    m.data.lap += 1;
+  }
+  return { lap: m.data.lap, cp: m.data.cp, done: m.data.lap > totalLaps };
+}
+
+// --- mission definitions -------------------------------------------------
+
+function raceCheckpoints(center, rx, rz, count) {
+  const pts = [];
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2;
+    pts.push({ x: center.x + Math.cos(a) * rx, z: center.z + Math.sin(a) * rz });
+  }
+  return pts;
+}
+
+const MISSION_DEFS = {
+  'first-wheels': {
+    setup(G, m) {
+      m.stage = 0;
+      const g = landmark(G, 'garage');
+      m.data.garage = g;
+      setWaypoint(m, g.x, g.z, g.label, 16);
+    },
+    update(G, m) {
+      const p = G.player;
+      if (m.stage === 0) {
+        if (!p.onFoot && p.vehicle) {
+          m.stage = 1;
+          notify(G, 'Nice wheels. Now bring it to Mara\u2019s garage.');
+        }
+        return 'active';
+      }
+      if (waypointReached(p.pos, m.data.waypoint)) return 'complete';
+      return 'active';
+    },
+    objective(G, m) {
+      return m.stage === 0
+        ? 'Steal a car (walk up to one and press E)'
+        : 'Drive to Mara\u2019s Garage';
+    },
+  },
+
+  'courier-run': {
+    setup(G, m) {
+      m.stage = 0;
+      m.timer = 240;
+      m.data.delivered = 0;
+      m.data.total = 3;
+      nextPackage(G, m);
+    },
+    update(G, m, dt) {
+      m.timer -= dt;
+      if (m.timer <= 0) return 'failed';
+      if (waypointReached(G.player.pos, m.data.waypoint, 12)) {
+        m.data.delivered += 1;
+        notify(G, `Package ${m.data.delivered} of 3 delivered.`);
+        if (m.data.delivered >= m.data.total) return 'complete';
+        nextPackage(G, m);
+      }
+      return 'active';
+    },
+    objective(G, m) {
+      return `Deliver package ${m.data.delivered + 1} of 3 — ${Math.ceil(m.timer)}s left`;
+    },
+  },
+
+  getaway: {
+    setup(G, m) {
+      m.stage = 0;
+      m.timer = 60;
+      if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(2);
+      notify(G, 'Two stars. Stay out of sight for 60 seconds.');
+    },
+    update(G, m, dt) {
+      m.timer -= dt;
+      const wanted = G.police ? G.police.wanted : 0;
+      if (wanted === 0) return 'complete';
+      if (m.timer <= 0) return 'complete';
+      return 'active';
+    },
+    objective(G, m) {
+      return `Lose the cops — ${Math.ceil(m.timer)}s left (wanted ${G.police ? G.police.wanted : 0}★)`;
+    },
+  },
+
+  'rival-rumble': {
+    setup(G, m) {
+      m.stage = 0;
+      const d = landmark(G, 'docks');
+      setWaypoint(m, d.x, d.z, d.label, 20);
+      m.data.total = 6;
+      m.data.spawned = false;
+      notify(G, 'Head to the docks. Kroll\u2019s crew is waiting.');
+    },
+    update(G, m) {
+      const p = G.player.pos;
+      if (!m.data.spawned) {
+        if (waypointReached(p, m.data.waypoint, 26)) {
+          m.data.spawned = true;
+          clearWaypoint(m);
+          const d = landmark(G, 'docks');
+          for (let i = 0; i < m.data.total; i++) {
+            const a = (i / m.data.total) * Math.PI * 2;
+            G.combat.spawnEnemy(d.x + Math.cos(a) * 14, d.z + Math.sin(a) * 14, { kind: 'kroll' });
+          }
+          notify(G, 'Six Kroll gunmen. Take them all down!');
+        }
+        return 'active';
+      }
+      const left = G.combat.enemies.filter((e) => e.alive).length;
+      m.data.left = left;
+      if (left === 0) return 'complete';
+      return 'active';
+    },
+    objective(G, m) {
+      if (!m.data.spawned) return 'Go to the docks';
+      return `Take down the Kroll crew — ${m.data.left ?? 6} left`;
+    },
+  },
+
+  'midnight-race': {
+    setup(G, m) {
+      m.stage = 0;
+      const c = landmark(G, 'beachfront');
+      m.data.cps = raceCheckpoints(c, 90, 70, 6);
+      m.data.cp = 0;
+      m.data.lap = 1;
+      m.data.laps = 3;
+      m.data.rivalCp = 0; // rival advances one checkpoint per 22 s
+      m.data.rivalTimer = 0;
+      placeAtCheckpoint(G, m, 0);
+    },
+    update(G, m, dt) {
+      const p = G.player.pos;
+      const cp = m.data.cps[m.data.cp];
+      if (waypointReached(p, cp, 16)) {
+        const r = advanceCheckpoint(m, m.data.cps.length, m.data.laps);
+        if (r.done) return 'complete';
+        placeAtCheckpoint(G, m, m.data.cp);
+        notify(G, r.cp === 0 ? `Lap ${Math.min(r.lap, m.data.laps)} of ${m.data.laps}` : `Checkpoint ${m.data.cp + 1}`);
+      }
+      // Rival pace: 18 checkpoints in ~396 s. Beat him.
+      m.data.rivalTimer += dt;
+      if (m.data.rivalTimer >= 22) {
+        m.data.rivalTimer = 0;
+        m.data.rivalCp += 1;
+        if (m.data.rivalCp >= m.data.cps.length * m.data.laps) return 'failed';
+      }
+      return 'active';
+    },
+    objective(G, m) {
+      return `Race — lap ${m.data.lap}/${m.data.laps}, checkpoint ${m.data.cp + 1}/6 (rival: ${m.data.rivalCp}/18)`;
+    },
+  },
+
+  'the-pickup': {
+    setup(G, m) {
+      m.stage = 0;
+      const d = landmark(G, 'downtown');
+      setWaypoint(m, d.x, d.z, 'Pick up Mara', 14);
+      notify(G, 'Pick Mara up downtown, then drive her to the Harbor.');
+    },
+    update(G, m) {
+      const p = G.player.pos;
+      if (m.stage === 0) {
+        if (waypointReached(p, m.data.waypoint, 14)) {
+          m.stage = 1;
+          const h = landmark(G, 'harbor');
+          setWaypoint(m, h.x, h.z, h.label, 16);
+          notify(G, 'Mara\u2019s in. Go — Harbor, fast!');
+        }
+        return 'active';
+      }
+      if (m.stage === 1) {
+        // Ambush halfway: Kroll gunmen + 3 stars once Rook is rolling.
+        if (!m.data.ambushed && G.player.vehicle) {
+          m.data.ambushed = true;
+          for (let i = 0; i < 3; i++) {
+            G.combat.spawnEnemy(p.x + (i - 1) * 12, p.z + 18, { kind: 'kroll' });
+          }
+          if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(3);
+          notify(G, 'Ambush! Kroll\u2019s boys — keep driving!');
+        }
+        if (waypointReached(p, m.data.waypoint, 16)) {
+          m.stage = 2;
+          return 'complete';
         }
       }
-    }
+      return 'active';
+    },
+    objective(G, m) {
+      return m.stage === 0 ? 'Pick up Mara downtown' : 'Drive Mara to the Harbor — don\u2019t stop!';
+    },
+  },
+
+  'harbor-heist': {
+    setup(G, m) {
+      m.stage = 0;
+      const h = landmark(G, 'harbor');
+      m.data.truck = null;
+      // The delivery truck, parked at the depot.
+      const spawn = (G.vehicles && typeof G.vehicles.spawn === 'function')
+        ? G.vehicles.spawn
+        : (typeof G.vehiclesSpawn === 'function' ? G.vehiclesSpawn : null);
+      if (typeof spawn === 'function') {
+        m.data.truck = spawn({ x: h.x + 10, z: h.z + 6, heading: 0, model: 'truck', driver: null, owned: false });
+      }
+      setWaypoint(m, h.x, h.z, 'Steal the delivery truck', 16);
+      notify(G, 'The truck is at the Harbor depot. Take it.');
+    },
+    update(G, m) {
+      const p = G.player;
+      if (m.stage === 0) {
+        const inTruck = !p.onFoot && p.vehicle && p.vehicle.model === 'truck';
+        if (inTruck || waypointReached(p.pos, m.data.waypoint, 10)) {
+          if (inTruck) {
+            m.stage = 1;
+            if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(4);
+            const w = landmark(G, 'warehouse');
+            setWaypoint(m, w.x, w.z, w.label, 18);
+            notify(G, 'Truck secured! Four stars — get it to the warehouse!');
+          } else {
+            notify(G, 'Get in the truck (E).');
+          }
+        }
+        return 'active';
+      }
+      if (waypointReached(p.pos, m.data.waypoint, 18)) return 'complete';
+      return 'active';
+    },
+    objective(G, m) {
+      return m.stage === 0 ? 'Steal the delivery truck at the Harbor' : 'Deliver the truck to the warehouse — 4★ wanted!';
+    },
+  },
+
+  'king-of-meridian': {
+    setup(G, m) {
+      m.stage = 0; // 0 race, 1 chase, 2 tower
+      const c = landmark(G, 'downtown');
+      m.data.cps = raceCheckpoints(c, 110, 80, 4);
+      m.data.cp = 0;
+      m.data.lap = 1;
+      m.data.laps = 2;
+      m.data.chaseTimer = 45;
+      m.data.total = 8;
+      placeAtCheckpoint(G, m, 0);
+      notify(G, 'Final job: beat Kroll\u2019s crew in the race first.');
+    },
+    update(G, m, dt) {
+      const p = G.player.pos;
+      if (m.stage === 0) {
+        const cp = m.data.cps[m.data.cp];
+        if (waypointReached(p, cp, 16)) {
+          const r = advanceCheckpoint(m, m.data.cps.length, m.data.laps);
+          if (r.done) {
+            m.stage = 1;
+            if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(4);
+            notify(G, 'Race won! Now lose the cops — 45 seconds!');
+          } else {
+            placeAtCheckpoint(G, m, m.data.cp);
+          }
+        }
+        return 'active';
+      }
+      if (m.stage === 1) {
+        m.data.chaseTimer -= dt;
+        const wanted = G.police ? G.police.wanted : 0;
+        if (wanted === 0 || m.data.chaseTimer <= 0) {
+          m.stage = 2;
+          const t = landmark(G, 'tower');
+          setWaypoint(m, t.x, t.z, t.label, 18);
+          for (let i = 0; i < m.data.total; i++) {
+            const a = (i / m.data.total) * Math.PI * 2;
+            G.combat.spawnEnemy(t.x + Math.cos(a) * 16, t.z + Math.sin(a) * 16, { kind: 'kroll' });
+          }
+          notify(G, 'Cops lost. Now the tower — clear it, top to bottom!');
+        }
+        return 'active';
+      }
+      // Stage 2: clear the tower.
+      const left = G.combat.enemies.filter((e) => e.alive).length;
+      m.data.left = left;
+      if (left === 0 && waypointReached(p, m.data.waypoint, 18)) return 'complete';
+      if (left === 0) notify(G, 'Tower clear. Get to the marker!');
+      return 'active';
+    },
+    objective(G, m) {
+      if (m.stage === 0) return `Final race — lap ${m.data.lap}/${m.data.laps}, checkpoint ${m.data.cp + 1}/4`;
+      if (m.stage === 1) return `Lose the cops — ${Math.ceil(m.data.chaseTimer)}s left (4★)`;
+      return `Clear Meridian Tower — ${m.data.left ?? 8} gunmen left`;
+    },
+  },
+};
+
+function nextPackage(G, m) {
+  const p = randomRoadPos(G);
+  setWaypoint(m, p.x, p.z, `Package ${m.data.delivered + 1}`, 12);
+}
+
+function placeAtCheckpoint(G, m, index) {
+  const cp = m.data.cps[index];
+  setWaypoint(m, cp.x, cp.z, `Checkpoint ${index + 1}`, 16);
+}
+
+function notify(G, text) {
+  if (G.hud && typeof G.hud.showMessage === 'function') G.hud.showMessage(text);
+}
+
+// --- public API ----------------------------------------------------------
+
+export function missionTitle(G, id) {
+  const slug = missionSlug(id);
+  if (G.story && G.story.briefings && slug && G.story.briefings[slug]) {
+    return G.story.briefings[slug].title;
   }
+  if (G.cfg && Array.isArray(G.cfg.MISSIONS)) {
+    const num = missionNum(id);
+    const entry = G.cfg.MISSIONS[num - 1];
+    if (entry) return entry.name;
+  }
+  return slug ?? String(id);
+}
+
+export function availableMissions(G) {
+  const done = G.missions.done instanceof Set ? G.missions.done : new Set();
+  return MISSION_ORDER
+    .map((slug, i) => i + 1)
+    .filter((num) => num <= done.size + 1 && !done.has(num));
+}
+
+export function startMission(G, id) {
+  const num = missionNum(id);
+  const slug = missionSlug(id);
+  if (!num || !slug) return null;
+  const def = MISSION_DEFS[slug];
+  if (!def) return null;
+  const ms = G.missions;
+  if (ms.done instanceof Set && ms.done.has(num)) return null; // already done
+  if (ms.done instanceof Set && num > ms.done.size + 1) return null; // locked
+  if (ms.active) return null; // one job at a time
+  const m = {
+    num,
+    id: slug,
+    def,
+    stage: 0,
+    timer: null,
+    data: {},
+    startedAt: G.time ? G.time.t : 0,
+  };
+  ms.active = m;
+  ms.current = num;
+  def.setup(G, m);
+  if (G.audio && typeof G.audio.play === 'function') G.audio.play('mission-start');
+  if (G.events && typeof G.events.emit === 'function') {
+    G.events.emit('mission-start', { id: num });
+  }
+  return m;
+}
+
+export function completeMission(G) {
+  const ms = G.missions;
+  const m = ms.active;
+  if (!m) return 0;
+  const reward = missionReward(G, m.num);
+  if (ms.done instanceof Set) ms.done.add(m.num);
+  else ms.done = new Set([m.num]);
+  ms.totalEarned = (ms.totalEarned ?? 0) + reward;
+  if (G.police && typeof G.police.clearWanted === 'function') G.police.clearWanted();
+  if (G.events && typeof G.events.emit === 'function') {
+    // main.js adds the reward to G.money on this event — never add it here.
+    G.events.emit('mission-complete', { id: m.num, reward });
+  }
+  if (G.audio && typeof G.audio.play === 'function') G.audio.play('mission-complete');
+  if (G.hud && typeof G.hud.showMessage === 'function') {
+    G.hud.showMessage(`Mission complete! +$${reward.toLocaleString('en-US')}`);
+  }
+  if (m.num === 8) {
+    if (G.events && typeof G.events.emit === 'function') G.events.emit('game-complete', {});
+  }
+  ms.active = null;
+  ms.current = 0;
+  clearMarker(G);
+  return reward;
+}
+
+export function failMission(G, reason) {
+  const ms = G.missions;
+  const m = ms.active;
+  if (!m) return;
+  ms.active = null;
+  ms.current = 0;
+  clearMarker(G);
+  if (G.events && typeof G.events.emit === 'function') {
+    G.events.emit('mission-failed', { id: m.num, reason });
+  }
+  if (G.hud && typeof G.hud.showMessage === 'function') {
+    G.hud.showMessage(`Mission failed (${reason}) — try again from the menu.`);
+  }
+}
+
+export function currentObjective(G) {
+  const ms = G.missions;
+  if (!ms) return 'Explore Port Meridian';
+  const m = ms.active;
+  if (!m) {
+    const next = availableMissions(G)[0];
+    if (next) return `Next job: ${missionTitle(G, next)} — open the menu (Esc) to start`;
+    if (ms.done instanceof Set && ms.done.size >= MISSION_ORDER.length) {
+      return 'King of Meridian. The city is yours.';
+    }
+    return 'Explore Port Meridian';
+  }
+  return m.def.objective(G, m);
+}
+
+// Set the active mission's waypoint (shots.js staging uses this).
+export function setActiveWaypoint(G, x, z, label) {
+  const m = G.missions && G.missions.active;
+  if (!m) return false;
+  setWaypoint(m, x, z, label ?? 'Waypoint', 16);
+  return true;
+}
+
+// --- marker mesh (THREE only when the global exists) ---------------------
+
+function clearMarker(G) {
+  const mk = G.missions.markerMesh;
+  if (mk && G.scene) G.scene.remove(mk);
+  G.missions.markerMesh = null;
+}
+
+function syncMarker(G) {
+  if (typeof THREE === 'undefined' || !G.scene) return;
+  const m = G.missions.active;
+  const wp = m ? m.data.waypoint : null;
+  if (!wp) {
+    clearMarker(G);
+    return;
+  }
+  if (!G.missions.markerMesh) {
+    const geo = new THREE.CylinderGeometry(0.6, 0.6, 30, 10, 1, true);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffd34d, transparent: true, opacity: 0.35, side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    G.scene.add(mesh);
+    G.missions.markerMesh = mesh;
+  }
+  const mesh = G.missions.markerMesh;
+  mesh.position.set(wp.x, 15, wp.z);
+  mesh.rotation.y += 0.02;
+}
+
+// --- lifecycle -----------------------------------------------------------
+
+export function init(G) {
+  // Replace the (frozen) module namespace on G with the live missions
+  // object. Shape matches main.js / save.js: done is a Set of mission
+  // numbers, current is a number (0 = none), active is the runtime object.
+  // (loadGame() overwrites done/current afterwards when a save exists.)
+  G.missions = {
+    done: new Set(),
+    current: 0,
+    active: null,
+    totalEarned: 0,
+    markerMesh: null,
+    update,
+    start: (id) => startMission(G, id),
+    setWaypoint: (x, z, label) => setActiveWaypoint(G, x, z, label),
+  };
+  return G.missions;
 }
 
 export function update(G, dt) {
   const ms = G.missions;
-  if (!ms || G.state !== 'playing') return;
-  dt = Math.min(dt, 0.05);
-  // A loaded save may have completed missions the unlock counter never saw.
-  if (ms.completed) ms.unlocked = Math.max(ms.unlocked, ms.completed.length + 1);
-  const m = ms.current;
-  if (!m) return;
-  const pos = playerPos(G);
-  const P = PLACES;
-
-  // Timed missions tick down. Expiry fails the mission only for the
-  // deadline missions (2, 5); for mission 3 (survive) and mission 8
-  // stage 1 (escape) expiry is the PASS condition, handled in their case.
-  if (m.timerMax > 0) {
-    m.timer -= dt;
-    if (m.timer <= 0) {
-      m.timer = 0;
-      if (m.id === 2 || m.id === 5) {
-        ms.failMission('Time ran out');
-        return;
-      }
+  if (!ms) return;
+  // Resume a mission the save says is in progress (loadGame set current
+  // but active is null until a mission object exists).
+  if (ms.current && !ms.active && G.state === 'playing') {
+    const num = ms.current;
+    ms.current = 0; // startMission refuses while current is set; clear first
+    if (!(ms.done instanceof Set && ms.done.has(num))) {
+      startMission(G, num);
+    } else {
+      ms.current = 0;
     }
   }
-
-  switch (m.id) {
-    case 1: {
-      if (m.stage === 0) {
-        if (G.player?.inVehicle) {
-          m.stage = 1;
-          m.waypoint = { ...P.garageRoad };
-          m.objectives = ["Drive it to Mara's garage"];
-          ms._syncMarker();
-        }
-      } else if (pos && atWaypoint(pos, P.garageRoad, 10) && G.player?.inVehicle) {
-        ms.passMission();
-      }
-      break;
-    }
-    case 2: {
-      if (pos && m.data.drops) {
-        const drop = m.data.drops[m.data.dropIndex];
-        if (drop && atWaypoint(pos, drop, 9)) {
-          m.data.dropIndex += 1;
-          sfx(G, 'delivery');
-          emit(G, 'package-delivered', { count: m.data.dropIndex });
-          if (m.data.dropIndex >= m.data.drops.length) {
-            ms.passMission();
-          } else {
-            m.waypoint = { ...m.data.drops[m.data.dropIndex] };
-            m.objectives = [`Deliver the packages (${m.data.dropIndex}/3)`, 'Beat the clock'];
-            ms._syncMarker();
-          }
-        }
-      }
-      break;
-    }
-    case 3: {
-      // Survive: the timer is the mission. Getting busted/wasted fails via onPlayerDown.
-      if (m.timer <= 0) {
-        G.police?.clearWanted?.();
-        ms.passMission();
-      }
-      break;
-    }
-    case 4: {
-      if (m.stage === 0) {
-        if (pos && atWaypoint(pos, P.pier9, 25)) {
-          m.stage = 1;
-          m.objectives = ['Clear the Kroll gunmen'];
-          // Spawn the crew on the pier.
-          for (let i = 0; i < 6; i++) {
-            G.combat?.spawnEnemy?.({
-              x: P.pier9.x + (Math.sin(i * 2.4) * 8),
-              z: P.pier9.z + (Math.cos(i * 2.4) * 5),
-              kind: i === 0 ? 'bruiser' : 'gunman',
-            });
-          }
-          emit(G, 'ambush', { count: 6 });
-          sfx(G, 'ambush');
-          m.data.spawned = true;
-        }
-      } else if (m.data.spawned && (G.combat?.enemies?.length ?? 0) === 0) {
-        ms.passMission();
-      }
-      break;
-    }
-    case 5: {
-      raceStep(G, m, dt);
-      const race = m.data.race;
-      if (race && raceFinished(race, 3)) {
-        const rival = G.missions._raceRival;
-        const rivalDone = rival && rival.lap >= 3;
-        if (!rivalDone) ms.passMission();
-        else ms.failMission('Dante\'s driver finished first');
-      }
-      break;
-    }
-    case 6: {
-      if (m.stage === 0) {
-        if (pos && atWaypoint(pos, P.garageRoad, 10)) {
-          G.missions._maraTimer += dt;
-          if (G.missions._maraTimer > 1.5) {
-            m.stage = 1;
-            m.data.pickedUp = true;
-            m.waypoint = { ...P.harborDepot };
-            m.objectives = ['Take Mara to the port', 'Escape the ambush'];
-            try {
-              G.story?.playLines?.(6, 'pickup');
-            } catch (e) { /* best-effort */ }
-            ms._syncMarker();
-          }
-        } else {
-          G.missions._maraTimer = 0;
-        }
-      } else if (m.stage === 1) {
-        // Ambush halfway: wanted 3 + two cop cars.
-        if (!m.data.ambushed && pos && dist2D(pos, P.harborDepot) < 90) {
-          m.data.ambushed = true;
-          G.police?.addWanted?.(55, 'mission');
-          G.police?.spawnCop?.();
-          G.police?.spawnCop?.();
-          emit(G, 'ambush', { count: 2 });
-          sfx(G, 'ambush');
-        }
-        if (pos && atWaypoint(pos, P.harborDepot, 10)) {
-          G.police?.clearWanted?.();
-          ms.passMission();
-        }
-      }
-      break;
-    }
-    case 7: {
-      if (m.stage === 0) {
-        const truck = (G.vehicles?.list ?? []).find((v) => v.id === m.data.truckId);
-        if (truck && G.player?.vehicle === truck) {
-          m.stage = 1;
-          m.waypoint = { ...P.hillsWarehouse };
-          m.objectives = ['Deliver the truck to the Hills warehouse', '4 stars on your tail'];
-          G.police?.addWanted?.(75, 'mission');
-          ms._syncMarker();
-        }
-      } else if (pos && atWaypoint(pos, P.hillsWarehouse, 11)) {
-        if (G.player?.vehicle?.kind === 'truck') {
-          G.police?.clearWanted?.();
-          ms.passMission();
-        }
-      }
-      break;
-    }
-    case 8: {
-      if (m.stage === 0) {
-        raceStep(G, m, dt);
-        const race = m.data.race;
-        if (race && raceFinished(race, 1)) {
-          const rival = G.missions._raceRival;
-          if (rival && rival.lap >= 1) {
-            ms.failMission('Dante won the race');
-          } else {
-            m.stage = 1;
-            m.timer = 30;
-            m.timerMax = 30;
-            m.waypoint = null;
-            m.objectives = ['Lose the cops — 30 seconds'];
-            G.police?.addWanted?.(55, 'mission');
-            try {
-              G.story?.playLines?.(8, 'raceDone');
-            } catch (e) { /* best-effort */ }
-            ms._syncMarker();
-          }
-        }
-      } else if (m.stage === 1) {
-        if (m.timer <= 0.01) {
-          G.police?.clearWanted?.();
-          m.stage = 2;
-          m.waypoint = { ...P.meridianTower };
-          m.objectives = ['Face Dante on the tower roof'];
-          // Dante + two gunmen at the tower base (outside the tower AABB).
-          G.combat?.spawnEnemy?.({ x: P.meridianTower.x + 24, z: P.meridianTower.z, kind: 'boss' });
-          G.combat?.spawnEnemy?.({ x: P.meridianTower.x - 24, z: P.meridianTower.z + 16, kind: 'gunman' });
-          G.combat?.spawnEnemy?.({ x: P.meridianTower.x - 24, z: P.meridianTower.z - 16, kind: 'gunman' });
-          ms._syncMarker();
-        }
-      } else if (m.stage === 2) {
-        if (pos && atWaypoint(pos, P.meridianTower, 22)
-          && (G.combat?.enemies?.length ?? 0) === 0) {
-          ms.passMission();
-        }
-      }
-      break;
-    }
-    default:
-      break;
+  const m = ms.active;
+  if (!m) {
+    syncMarker(G);
+    return;
   }
+  // Busted or wasted mid-mission: the job is blown. (In the real game
+  // main.js ends the run on those events and this update stops being
+  // called; the check still matters for standalone/test runs.)
+  if (G.state === 'busted') {
+    failMission(G, 'busted');
+    return;
+  }
+  if (G.state === 'wasted') {
+    failMission(G, 'wasted');
+    return;
+  }
+  if (G.state !== 'playing') return;
+  const result = m.def.update(G, m, dt);
+  if (result === 'complete') completeMission(G);
+  else if (result === 'failed') failMission(G, 'failed');
+  syncMarker(G);
 }

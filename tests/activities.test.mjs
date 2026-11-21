@@ -1,195 +1,283 @@
-// Activities: taxi fares, race circuits, hidden packages — the economy
-// math plus the live flows.
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  taxiFare, taxiTip, raceReward, packagePayout, raceCircuits,
-  packageSpots, init, update,
-} from '../game/src/activities.js';
-import { init as initPlayer } from '../game/src/player.js';
-import { init as initVehicles } from '../game/src/vehicles.js';
-import { init as initPeds } from '../game/src/peds.js';
-import * as world from '../game/src/world.js';
-import { installThreeStub, makeG } from './helpers.mjs';
+import * as activities from '../game/src/activities.js';
+import * as vehicles from '../game/src/vehicles.js';
+import * as player from '../game/src/player.js';
+import * as peds from '../game/src/peds.js';
+import { makeG } from './helpers.mjs';
 
-installThreeStub();
-
-test('activities: taxiFare is base + per-metre, rounded to $5', () => {
-  assert.equal(taxiFare(0, 120, 0.35), 120);
-  assert.ok(taxiFare(500, 120, 0.35) > 120);
-  assert.equal(taxiFare(100, 120, 0.35) % 5, 0);
-  assert.ok(taxiFare(0, 25, 0.35) >= 25, 'never below the minimum');
-});
-
-test('activities: taxiTip rewards fast deliveries', () => {
-  assert.equal(taxiTip(200, 30, 60), 50);
-  assert.equal(taxiTip(200, 80, 60), 20);
-  assert.equal(taxiTip(200, 200, 60), 0);
-});
-
-test('activities: raceReward pays 1st best, then 2nd, then 3rd', () => {
-  assert.equal(raceReward(1, 800), 800);
-  assert.equal(raceReward(2, 800), 320);
-  assert.equal(raceReward(3, 800), 120);
-  assert.equal(raceReward(4, 800), 0);
-});
-
-test('activities: packagePayout bonuses every 5th package', () => {
-  assert.equal(packagePayout(1), 250);
-  assert.equal(packagePayout(4), 250);
-  assert.equal(packagePayout(5), 500);
-  assert.equal(packagePayout(10), 500);
-});
-
-test('activities: three circuits with distinct loops and targets', () => {
-  const circuits = raceCircuits();
-  assert.equal(circuits.length, 3);
-  const ids = circuits.map((c) => c.id);
-  assert.deepEqual(ids, ['harbor', 'downtown', 'coast']);
-  for (const c of circuits) {
-    assert.ok(c.checkpoints.length >= 4, c.id);
-    assert.ok(c.laps >= 2, c.id);
-    assert.ok(c.targetSeconds > 0, c.id);
-    assert.ok(c.reward > 0, c.id);
-  }
-});
-
-test('activities: packageSpots is deterministic per rng', () => {
-  const rngA = () => 0.25;
-  const rngB = () => 0.25;
-  assert.deepEqual(packageSpots(rngA, 20), packageSpots(rngB, 20));
-  assert.equal(packageSpots(rngA, 20).length, 20);
-});
-
-test('activities: init prefers the world package spots', () => {
+function bootedG() {
   const G = makeG();
-  G.world = {
-    packageSpots: Array.from({ length: 30 }, (_, i) => ({ x: i * 10, z: i * 5 })),
-  };
-  const a = init(G);
-  assert.equal(a.packages.length, 20);
-  assert.equal(a.packages[0].x, 0);
-  assert.equal(a.packages[19].x, 190);
-  assert.ok(a.packages.every((p) => !p.found));
-});
+  vehicles.init(G);
+  player.init(G);
+  peds.init(G);
+  activities.init(G);
+  G.hud = { showMessage: () => {} };
+  return G;
+}
 
-test('activities: walking over a package collects it', () => {
-  const G = makeG();
-  initPlayer(G);
-  const a = init(G);
-  const pkg = a.packages[0];
-  G.player.pos.x = pkg.x;
-  G.player.pos.z = pkg.z;
-  G.player.x = pkg.x;
-  G.player.z = pkg.z;
-  const money0 = G.player.money;
-  update(G, 1 / 60);
-  assert.equal(pkg.found, true);
-  assert.equal(a.packagesFound, 1);
-  assert.equal(G.player.money, money0 + 250);
-});
-
-test('activities: taxi fare starts, picks up, and pays on delivery', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  initPeds(G);
-  const a = init(G);
-  const car = G.vehicles.spawn({ x: 0, z: 0, heading: 0, kind: 'sedan' });
-  G.player.enterVehicle(car);
-  // Put a ped next to the car so a fare can start.
-  const ped = G.peds.list[0];
-  ped.pos.x = 2;
-  ped.pos.z = 2;
-  assert.equal(a.startTaxi(), true);
-  assert.equal(a.taxi.active, true);
-  assert.equal(a.taxi.stage, 'pickup');
-  // The passenger walks to the car.
-  for (let i = 0; i < 300 && a.taxi.stage === 'pickup'; i++) update(G, 1 / 60);
-  assert.equal(a.taxi.stage, 'dropoff');
-  // Drive to the destination.
-  const money0 = G.player.money;
-  car.pos.x = a.taxi.destination.x;
-  car.pos.z = a.taxi.destination.z;
-  update(G, 1 / 60);
-  assert.equal(a.taxi.active, false);
-  assert.equal(a.taxiDone, 1);
-  assert.ok(G.player.money > money0, 'fare paid');
-});
-
-test('activities: race finishes and pays the winner', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const a = init(G);
-  const car = G.vehicles.spawn({ x: 144, z: 72, heading: 0, kind: 'sedan' });
-  G.player.enterVehicle(car);
-  assert.equal(a.startRace('harbor'), true);
-  const race = a.race;
-  assert.equal(race.laps, 3);
-  // Teleport through every checkpoint of every lap.
-  const money0 = G.player.money;
-  for (let lap = 0; lap < 3; lap++) {
-    for (const cp of race.checkpoints) {
-      car.pos.x = cp.x;
-      car.pos.z = cp.z;
-      update(G, 1 / 60);
-      if (!a.race) break;
+describe('mulberry32', () => {
+  it('is deterministic for the same seed', () => {
+    const a = activities.mulberry32(7);
+    const b = activities.mulberry32(7);
+    for (let i = 0; i < 20; i++) assert.equal(a(), b());
+  });
+  it('differs between seeds', () => {
+    const a = activities.mulberry32(7);
+    const b = activities.mulberry32(8);
+    assert.notEqual(a(), b());
+  });
+  it('stays in [0, 1)', () => {
+    const r = activities.mulberry32(42);
+    for (let i = 0; i < 100; i++) {
+      const v = r();
+      assert.ok(v >= 0 && v < 1);
     }
-    if (!a.race) break;
+  });
+});
+
+describe('packageSpots', () => {
+  it('returns the requested count, deterministic per seed', () => {
+    const a = activities.packageSpots(7, 20);
+    const b = activities.packageSpots(7, 20);
+    assert.equal(a.length, 20);
+    assert.deepEqual(a, b);
+    assert.ok(a.every((s) => s.found === false));
+  });
+  it('differs between seeds', () => {
+    const a = activities.packageSpots(7, 20);
+    const b = activities.packageSpots(8, 20);
+    assert.notDeepEqual(a, b);
+  });
+});
+
+describe('taxiFare', () => {
+  it('charges base plus per-metre', () => {
+    assert.equal(activities.taxiFare(0), 20);
+    assert.equal(activities.taxiFare(100), 35);
+    assert.equal(activities.taxiFare(100, { taxiBase: 60, taxiPerM: 0.9 }), 150);
+  });
+});
+
+describe('raceCheckpoints and formatRaceTime', () => {
+  it('builds four checkpoints around the circuit centre', () => {
+    const cps = activities.raceCheckpoints(activities.CIRCUITS.downtown);
+    assert.equal(cps.length, 4);
+    assert.deepEqual(cps[0], { x: 110, z: 0 });
+  });
+  it('formats race times', () => {
+    assert.equal(activities.formatRaceTime(75.25), '1:15.25');
+    assert.equal(activities.formatRaceTime(9.5), '0:09.50');
+    assert.equal(activities.formatRaceTime(null), '--:--.--');
+  });
+});
+
+describe('economy', () => {
+  it('reads G.cfg.ECONOMY when present', () => {
+    const e = activities.economy(makeG());
+    assert.equal(e.taxiBase, 60);
+    assert.equal(e.taxiPerM, 0.9);
+    assert.equal(e.packageReward, 250);
+    assert.equal(e.raceReward, 1500);
+  });
+  it('falls back without cfg', () => {
+    const e = activities.economy({});
+    assert.equal(e.taxiBase, activities.TAXI_BASE_FARE);
+  });
+});
+
+describe('taxi', () => {
+  it('refuses without a car', () => {
+    const G = bootedG();
+    assert.equal(activities.startTaxi(G), false);
+    assert.equal(G.activities.taxi.active, false);
+  });
+  it('refuses with no passengers nearby', () => {
+    const G = bootedG();
+    const car = G.vehicles.list[0];
+    G.player.pos.x = car.pos.x + 1;
+    G.player.pos.z = car.pos.z;
+    player.tryEnterExitVehicle(G);
+    G.peds.list.length = 0;
+    assert.equal(activities.startTaxi(G), false);
+  });
+  it('picks the nearest pedestrian as passenger', () => {
+    const G = bootedG();
+    const car = G.vehicles.list[0];
+    G.player.pos.x = car.pos.x + 1;
+    G.player.pos.z = car.pos.z;
+    player.tryEnterExitVehicle(G);
+    peds.spawnPed(G, car.pos.x + 5, car.pos.z + 2);
+    assert.equal(activities.startTaxi(G), true);
+    assert.equal(G.activities.taxi.active, true);
+    assert.equal(G.activities.taxi.stage, 'pickup');
+    assert.ok(G.activities.taxi.passenger);
+  });
+  it('completes pickup and dropoff and pays the fare', () => {
+    const G = bootedG();
+    const car = G.vehicles.list[0];
+    G.player.pos.x = car.pos.x + 1;
+    G.player.pos.z = car.pos.z;
+    player.tryEnterExitVehicle(G);
+    peds.spawnPed(G, car.pos.x + 5, car.pos.z + 2);
+    activities.startTaxi(G);
+    const moneyBefore = G.money;
+    // Drive to the passenger.
+    const pickup = G.activities.taxi.pickup;
+    G.player.pos.x = pickup.x;
+    G.player.pos.z = pickup.z;
+    activities.update(G, 0.1);
+    assert.equal(G.activities.taxi.stage, 'dropoff');
+    assert.ok(G.activities.taxi.fare > 0);
+    // Drive to the destination.
+    const drop = G.activities.taxi.dropoff;
+    G.player.pos.x = drop.x;
+    G.player.pos.z = drop.z;
+    activities.update(G, 0.1);
+    assert.equal(G.activities.taxi.active, false);
+    assert.ok(G.money > moneyBefore);
+    assert.equal(G.activities.taxiDone, 1);
+  });
+  it('cancels when the driver leaves the car', () => {
+    const G = bootedG();
+    const car = G.vehicles.list[0];
+    G.player.pos.x = car.pos.x + 1;
+    G.player.pos.z = car.pos.z;
+    player.tryEnterExitVehicle(G);
+    peds.spawnPed(G, car.pos.x + 5, car.pos.z + 2);
+    activities.startTaxi(G);
+    player.tryEnterExitVehicle(G); // step out
+    activities.update(G, 0.1);
+    assert.equal(G.activities.taxi.active, false);
+  });
+  it('starts on justPressed T', () => {
+    const G = bootedG();
+    const car = G.vehicles.list[0];
+    G.player.pos.x = car.pos.x + 1;
+    G.player.pos.z = car.pos.z;
+    player.tryEnterExitVehicle(G);
+    peds.spawnPed(G, car.pos.x + 5, car.pos.z + 2);
+    G.input.justPressed = { KeyT: true };
+    activities.update(G, 0.1);
+    assert.equal(G.activities.taxi.active, true);
+  });
+});
+
+describe('races', () => {
+  function racingG() {
+    const G = bootedG();
+    const car = G.vehicles.list[0];
+    G.player.pos.x = car.pos.x + 1;
+    G.player.pos.z = car.pos.z;
+    player.tryEnterExitVehicle(G);
+    return G;
   }
-  assert.equal(a.race, null, 'race finished');
-  assert.equal(a.racesWon, 1, 'player won (rival is slower)');
-  assert.ok(G.player.money >= money0 + 800);
-});
-
-test('activities: race cannot start on foot or twice', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const a = init(G);
-  assert.equal(a.startRace('harbor'), false, 'on foot');
-  const car = G.vehicles.spawn({ x: 0, z: 0, heading: 0, kind: 'sedan' });
-  G.player.enterVehicle(car);
-  assert.equal(a.startRace('harbor'), true);
-  assert.equal(a.startRace('downtown'), false, 'already racing');
-});
-
-test('activities: every package spot is reachable (outside buildings, off roads)', () => {
-  const G = makeG();
-  world.init(G);
-  initPlayer(G);
-  const a = init(G);
-  assert.equal(a.packages.length, 20);
-  const distToSegment = (x, z, r) => {
-    const abx = r.bx - r.ax;
-    const abz = r.bz - r.az;
-    const len2 = abx * abx + abz * abz;
-    let t = len2 === 0 ? 0 : ((x - r.ax) * abx + (z - r.az) * abz) / len2;
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    return Math.hypot(x - (r.ax + abx * t), z - (r.az + abz * t));
-  };
-  for (const pkg of a.packages) {
-    for (const b of G.world.buildings) {
-      const inside = pkg.x >= b.minX - 1 && pkg.x <= b.maxX + 1
-        && pkg.z >= b.minZ - 1 && pkg.z <= b.maxZ + 1;
-      assert.ok(!inside, `package (${pkg.x}, ${pkg.z}) inside ${b.name}`);
+  it('refuses without a car', () => {
+    const G = bootedG();
+    assert.equal(activities.startRace(G, 'downtown'), false);
+  });
+  it('refuses an unknown circuit', () => {
+    const G = racingG();
+    assert.equal(activities.startRace(G, 'nowhere'), false);
+  });
+  it('starts a race and tracks checkpoints', () => {
+    const G = racingG();
+    assert.equal(activities.startRace(G, 'downtown'), true);
+    assert.equal(G.activities.race.active, true);
+    assert.equal(G.activities.race.laps, 3);
+    assert.equal(G.activities.race.cps.length, 4);
+  });
+  it('finishes after all laps and pays the prize', () => {
+    const G = racingG();
+    activities.startRace(G, 'harbor'); // 2 laps
+    const moneyBefore = G.money;
+    const race = G.activities.race;
+    for (let lap = 0; lap < 2; lap++) {
+      for (let cp = 0; cp < 4; cp++) {
+        const point = race.cps[race.cp];
+        G.player.pos.x = point.x;
+        G.player.pos.z = point.z;
+        activities.update(G, 0.5);
+      }
     }
-    for (const r of G.world.roads) {
-      assert.ok(distToSegment(pkg.x, pkg.z, r) >= 7, `package (${pkg.x}, ${pkg.z}) on a road`);
+    assert.equal(G.activities.race.active, false);
+    assert.ok(G.money >= moneyBefore + 1500);
+    assert.equal(G.activities.racesWon, 1);
+    assert.ok(G.activities.races.harbor.best != null);
+  });
+  it('records a better best time on a faster rerun', () => {
+    const G = racingG();
+    G.activities.races.harbor.best = 100;
+    activities.startRace(G, 'harbor');
+    const race = G.activities.race;
+    for (let lap = 0; lap < 2; lap++) {
+      for (let cp = 0; cp < 4; cp++) {
+        const point = race.cps[race.cp];
+        G.player.pos.x = point.x;
+        G.player.pos.z = point.z;
+        activities.update(G, 0.1);
+      }
     }
-  }
+    assert.ok(G.activities.races.harbor.best < 100);
+  });
 });
 
-test('activities: few world spots still top up to 20 packages', () => {
-  const G = makeG();
-  G.world = {
-    packageSpots: [{ x: 0, z: 0 }, { x: 10, z: 5 }, { x: 20, z: 10 }],
-    buildings: [],
-    roads: [],
-  };
-  const a = init(G);
-  assert.equal(a.packages.length, 20);
-  assert.equal(a.packages[0].x, 0);
-  assert.equal(a.packages[2].x, 20);
+describe('hidden packages', () => {
+  it('collects a package on contact and pays the reward', () => {
+    const G = bootedG();
+    const spot = G.activities.packages.spots[0];
+    const moneyBefore = G.money;
+    G.player.pos.x = spot.x;
+    G.player.pos.z = spot.z;
+    activities.update(G, 0.1);
+    assert.equal(spot.found, true);
+    assert.equal(G.activities.packages.found, 1);
+    assert.ok(G.activities.packagesFound.has(0));
+    assert.equal(G.money, moneyBefore + 250);
+  });
+  it('does not pay twice for the same package', () => {
+    const G = bootedG();
+    const spot = G.activities.packages.spots[0];
+    G.player.pos.x = spot.x;
+    G.player.pos.z = spot.z;
+    activities.update(G, 0.1);
+    const moneyAfterFirst = G.money;
+    activities.update(G, 0.1);
+    assert.equal(G.money, moneyAfterFirst);
+  });
+  it('pays the 10-package bonus', () => {
+    const G = bootedG();
+    for (let i = 0; i < 9; i++) {
+      G.activities.packages.spots[i].found = true;
+      G.activities.packagesFound.add(i);
+    }
+    G.activities.packages.found = 9;
+    const spot = G.activities.packages.spots[9];
+    const moneyBefore = G.money;
+    G.player.pos.x = spot.x;
+    G.player.pos.z = spot.z;
+    activities.update(G, 0.1);
+    // Snapped spots can coincide, so a second package may come along:
+    // assert at-least, not exact.
+    assert.ok(G.activities.packages.found >= 10);
+    assert.ok(G.money >= moneyBefore + 250 + 500);
+  });
+  it('syncs found packages from a loaded save on first update', () => {
+    const G = bootedG();
+    G.activities.packagesFound.add(3);
+    G.activities.packagesFound.add(4);
+    activities.update(G, 0.1);
+    assert.equal(G.activities.packages.spots[3].found, true);
+    assert.equal(G.activities.packages.spots[4].found, true);
+    assert.equal(G.activities.packages.found, 2);
+  });
+  it('does not run when the game is not playing', () => {
+    const G = bootedG();
+    G.state = 'menu';
+    const spot = G.activities.packages.spots[0];
+    G.player.pos.x = spot.x;
+    G.player.pos.z = spot.z;
+    activities.update(G, 0.1);
+    assert.equal(spot.found, false);
+  });
 });

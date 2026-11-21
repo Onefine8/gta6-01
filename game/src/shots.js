@@ -1,199 +1,177 @@
-// Meridian Heat — screenshot staging presets (?shot=chase|walk|mission|night).
-// Each preset drops the player into a composed, already-playing scene so a
-// headless screenshot shows the game at its best: chase, on-foot city,
-// mission in progress, neon night. Audio stays silent in shot mode.
-// Only imports config.js / random.js; everything else goes through G and is
-// guarded, so staging never throws when a gameplay module is absent.
-import { CONFIG } from './config.js';
-import { createRng } from './random.js';
+// Meridian Heat — screenshot presets (?shot=chase|walk|mission|night&seed=N).
+// Stages a deterministic scene for the finisher's headless screenshots:
+// positions the player, spawns traffic/police, sets the time of day and
+// the camera, then starts the game with audio muted. Every step guards
+// against gameplay modules that are still stubs, so staging never throws.
 
-const cfg = CONFIG;
+import { CFG } from './config.js';
+
+export const shots = {
+  active: false,
+  preset: null,
+  seed: CFG.DEFAULT_SEED,
+};
+
+function roadPos(G, x, z) {
+  if (G.world && G.world.nearestRoadPoint) return G.world.nearestRoadPoint(x, z);
+  return { x, z, heading: 0 };
+}
+
+function placePlayer(G, x, z, heading) {
+  const p = G.player;
+  if (!p || !p.pos) return;
+  const rp = roadPos(G, x, z);
+  p.pos.x = rp.x;
+  p.pos.z = rp.z;
+  p.pos.y = 0;
+  p.heading = heading !== undefined ? heading : rp.heading;
+  p.onFoot = true;
+  p.vehicle = null;
+  if (typeof p.speed !== 'undefined') p.speed = 0;
+}
+
+function giveCar(G, x, z, heading, color) {
+  const p = G.player;
+  const v = G.vehicles;
+  if (!p || !v || typeof v.spawn !== 'function') return null;
+  const rp = roadPos(G, x, z);
+  const car = v.spawn({
+    x: rp.x, z: rp.z, heading: heading !== undefined ? heading : rp.heading,
+    color: color || 0xc03028, parked: false,
+  });
+  if (car && typeof v.enter === 'function') v.enter(car);
+  else if (car) { p.vehicle = car; p.onFoot = false; }
+  return car;
+}
+
+function spawnTraffic(G, n, nearX, nearZ) {
+  const t = G.traffic;
+  if (!t || typeof t.spawnNear !== 'function') return;
+  for (let i = 0; i < n; i++) t.spawnNear(nearX, nearZ, 40 + i * 12);
+}
+
+function setWanted(G, stars) {
+  const pol = G.police;
+  if (!pol) return;
+  pol.wanted = stars;
+  if (typeof pol.setWanted === 'function') pol.setWanted(stars);
+  if (typeof pol.spawnPursuit === 'function' && stars > 0) {
+    const p = G.player;
+    pol.spawnPursuit(p ? p.pos : { x: 0, z: 0 }, stars);
+  }
+}
+
+function setObjective(G, text) {
+  const n = document.getElementById('objective');
+  if (n) n.textContent = text;
+  if (G.hud && typeof G.hud.setObjective === 'function') G.hud.setObjective(text);
+}
+
+function setMessage(G, text) {
+  const n = document.getElementById('message');
+  if (n) {
+    n.textContent = text;
+    n.classList.remove('hidden');
+  }
+  if (G.hud && typeof G.hud.showMessage === 'function') G.hud.showMessage(text, 30);
+}
 
 const PRESETS = {
-  chase: {
-    dayTime: 15.0, wanted: 2,
-    player: { x: 36, z: 0, heading: Math.PI / 2 },
-    note: 'Police pursuit on a downtown avenue',
+  // Police chase at dusk: Rook in a red coupe, 3 stars, two cop cars close.
+  chase(G) {
+    G.time.dayTime = 17.8;
+    const p = G.player;
+    const cx = p && p.pos ? p.pos.x : 0;
+    const cz = p && p.pos ? p.pos.z : 0;
+    giveCar(G, cx, cz, 0, 0xc03028);
+    setWanted(G, 3);
+    spawnTraffic(G, 6, cx, cz);
+    setObjective(G, 'Lose the cops — 3 stars');
+    setMessage(G, 'MERIDIAN PD IN PURSUIT');
+    if (G.render) { G.render.camDist = 13; G.render.camPitch = 0.3; }
   },
-  walk: {
-    dayTime: 11.0, wanted: 0,
-    // Sidewalk edge of the x=0 downtown avenue, facing down the road so
-    // the follow camera (11 m behind) frames a street vista, not a wall.
-    player: { x: 7, z: 40, heading: Math.PI },
-    note: 'On foot in Downtown Port Meridian',
+
+  // On foot in Downtown at midday, pedestrians and traffic around.
+  walk(G) {
+    G.time.dayTime = 11.2;
+    const lm = G.world && G.world.landmarks;
+    const x = lm ? lm.plaza.x : 0;
+    const z = lm ? lm.plaza.z : 0;
+    placePlayer(G, x, z + 6, Math.PI * 0.75);
+    spawnTraffic(G, 8, x, z);
+    if (G.peds && typeof G.peds.spawnNear === 'function') {
+      for (let i = 0; i < 6; i++) G.peds.spawnNear(x, z, 25);
+    }
+    setObjective(G, 'Explore Port Meridian');
+    setMessage(G, 'DOWNTOWN — MERIDIAN PLAZA');
+    if (G.render) { G.render.camDist = 9; G.render.camPitch = 0.35; }
   },
-  mission: {
-    dayTime: 13.5, wanted: 0, mission: 0,
-    player: { x: -18, z: 84, heading: Math.PI },
-    note: 'Mission 1 — First Wheels: steal a car, reach Mara’s garage',
+
+  // Mission 1 in progress: stolen car, waypoint to Mara's garage.
+  mission(G) {
+    G.time.dayTime = 9.4;
+    const lm = G.world && G.world.landmarks;
+    giveCar(G, lm ? lm.spawn.x : 0, lm ? lm.spawn.z : 0, Math.PI / 2, 0x2e6bb0);
+    if (G.missions && typeof G.missions.start === 'function') {
+      G.missions.start(1);
+    } else if (G.missions) {
+      G.missions.current = 1;
+    }
+    if (lm && G.missions && typeof G.missions.setWaypoint === 'function') {
+      G.missions.setWaypoint(lm.garage.x, lm.garage.z, 'Mara\u2019s Garage');
+    }
+    spawnTraffic(G, 5, lm ? lm.spawn.x : 0, lm ? lm.spawn.z : 0);
+    setObjective(G, 'Mission 1 — First Wheels: drive to Mara\u2019s Garage');
+    setMessage(G, 'MISSION 1 — FIRST WHEELS');
+    if (G.render) { G.render.camDist = 12; G.render.camPitch = 0.32; }
   },
-  night: {
-    dayTime: 21.5, wanted: 1,
-    // Same downtown avenue, facing -z: building neon strips sit on the
-    // maxZ faces, so they read from this direction; Meridian Tower closes
-    // the vista at the end of the road.
-    player: { x: 7, z: -40, heading: Math.PI },
-    note: 'Neon night in Downtown Port Meridian',
+
+  // Night in the neon district: 2 stars, wet-looking streets, signs lit.
+  night(G) {
+    G.time.dayTime = 21.6;
+    const lm = G.world && G.world.landmarks;
+    const x = lm ? lm.tower.x : 0;
+    const z = lm ? lm.tower.z + 60 : 0;
+    giveCar(G, x, z, Math.PI, 0xc0c8d0);
+    setWanted(G, 2);
+    spawnTraffic(G, 8, x, z);
+    if (G.peds && typeof G.peds.spawnNear === 'function') {
+      for (let i = 0; i < 4; i++) G.peds.spawnNear(x, z, 30);
+    }
+    setObjective(G, 'Lose the cops — 2 stars');
+    setMessage(G, 'MERIDIAN TOWER — 21:36');
+    if (G.render) { G.render.camDist = 12; G.render.camPitch = 0.3; }
   },
 };
 
-function $(id) {
-  return document.getElementById(id);
-}
-
-function showHud() {
-  const hud = $('hud');
-  if (hud) hud.classList.remove('hidden');
-  const menu = $('menu');
-  if (menu) menu.classList.add('hidden');
-  const pause = $('pause-menu');
-  if (pause) pause.classList.add('hidden');
-  const end = $('end-screen');
-  if (end) end.classList.add('hidden');
-}
-
-function placePlayer(G, spot) {
-  const p = G.player;
-  if (!p) return;
-  p.x = spot.x;
-  p.z = spot.z;
-  p.heading = spot.heading;
-  if (typeof p.speed !== 'undefined') p.speed = 0;
-  if (typeof p.health !== 'undefined') p.health = cfg.PLAYER.maxHealth;
-  if (typeof p.inVehicle !== 'undefined') p.inVehicle = false;
-  if (p.pos) { p.pos.x = spot.x; p.pos.z = spot.z; }
-}
-
-function setWanted(G, level) {
-  // Prefer the police module's own setter when it exists.
-  if (G.police && typeof G.police.setWanted === 'function') {
-    G.police.setWanted(level);
-    return;
-  }
-  if (G.police) G.police.wanted = level;
-  else G.police = { wanted: level, chasing: level > 0 };
-}
-
-function stageChaseVehicles(G, rng) {
-  // Put the player in a car and police cars behind, when those modules exist.
-  if (G.vehicles && typeof G.vehicles.spawnCar === 'function' && G.player) {
-    const car = G.vehicles.spawnCar({
-      x: G.player.x, z: G.player.z, heading: G.player.heading, model: 'sedan', color: 0xc03028,
-    });
-    if (car && typeof G.vehicles.enter === 'function') G.vehicles.enter(car);
-    else if (car && G.player) { G.player.inVehicle = true; G.player.vehicle = car; }
-    if (car) car.speed = 26;
-  } else if (G.vehicles && Array.isArray(G.vehicles.list) && G.player) {
-    // Fallback: a plain car record the render loop can draw later.
-    const car = {
-      x: G.player.x, z: G.player.z, heading: G.player.heading,
-      speed: 26, color: 0xc03028, model: 'sedan', isPlayer: true,
-    };
-    G.vehicles.list.push(car);
-    G.player.inVehicle = true;
-    G.player.vehicle = car;
-  }
-  if (G.police && typeof G.police.spawnPursuit === 'function') {
-    G.police.spawnPursuit(2);
-  } else if (G.police && typeof G.police.spawn === 'function') {
-    G.police.spawn({ x: G.player.x - 18, z: G.player.z - 6, heading: G.player.heading });
-    G.police.spawn({ x: G.player.x - 26, z: G.player.z + 8, heading: G.player.heading });
-  }
-  void rng;
-}
-
-function stageMission(G, preset) {
-  if (G.missions && typeof G.missions.start === 'function') {
-    G.missions.start(preset.mission || 0);
-  } else if (G.missions) {
-    G.missions.currentIndex = preset.mission || 0;
-    G.missions.active = true;
-  }
-  // Waypoint marker: garage just ahead of the player.
-  if (G.hud && typeof G.hud.setObjective === 'function') {
-    G.hud.setObjective('Steal a car and drive it to Mara’s garage');
-  }
-  const obj = $('objective');
-  if (obj) obj.textContent = 'Steal a car and drive it to Mara’s garage';
-}
-
-function stageWalkCrowd(G) {
-  // A few pedestrians nearby make the street feel alive.
-  if (G.peds && typeof G.peds.spawn === 'function') {
-    for (let i = 0; i < 6; i++) {
-      G.peds.spawn({
-        x: G.player.x + (i - 3) * 6,
-        z: G.player.z + 14 - i * 3,
-      });
-    }
-  }
-}
-
 export function init(G) {
   const params = new URLSearchParams(window.location.search);
-  const shot = params.get('shot');
-  if (!shot || !PRESETS[shot]) return null;
-
-  const preset = PRESETS[shot];
+  const preset = params.get('shot');
+  if (!preset || !PRESETS[preset]) return shots;
   const seedParam = params.get('seed');
-  const seed = seedParam !== null ? Number(seedParam) : cfg.SHOTS[shot].seed;
-  const rng = createRng(Number.isFinite(seed) ? seed : 7);
-
+  shots.seed = seedParam !== null ? Number(seedParam) || CFG.DEFAULT_SEED : G.seed;
+  shots.preset = preset;
+  shots.active = true;
   G.shotMode = true;
-  G.shot = shot;
 
-  // Silence audio completely in screenshot mode.
-  if (G.audio && typeof G.audio.setMuted === 'function') G.audio.setMuted(true);
-
-  // Time of day for the shot (world.update advances the clock from here).
-  G.time.dayTime = preset.dayTime;
-
-  // Player placement + wanted level.
-  placePlayer(G, preset.player);
-  setWanted(G, preset.wanted);
-
-  // Per-preset staging.
-  if (shot === 'chase') stageChaseVehicles(G, rng);
-  if (shot === 'walk') stageWalkCrowd(G);
-  if (shot === 'mission') stageMission(G, preset);
-  if (shot === 'night' && G.police && typeof G.police.spawn === 'function') {
-    // Police car ahead on the same avenue, in frame, lights on.
-    G.police.spawn({ x: 0, z: G.player.z - 25, heading: G.player.heading });
+  // Deterministic staging: re-seed the world RNG for this shot.
+  // (The city itself was built at boot from G.seed; staging only moves actors.)
+  try {
+    PRESETS[preset](G);
+  } catch (e) {
+    console.warn('[shots] staging failed for preset', preset, e);
   }
 
-  // Skip the start screen: go straight into the playing scene.
-  G.state = 'playing';
-  if (G.render && typeof G.render.setCameraMode === 'function') {
-    G.render.setCameraMode('follow');
-  }
-  showHud();
-
-  // Banner text so the shot reads as a live mission moment.
-  const msg = $('message');
-  if (msg) {
-    msg.textContent = preset.note;
-    msg.classList.remove('hidden');
-  }
-  if (G.hud && typeof G.hud.showMessage === 'function') {
-    G.hud.showMessage(preset.note);
-  }
-
-  G.shotStaged = { name: shot, seed: rng.seed, note: preset.note };
-  return G.shotStaged;
+  // Silence: screenshots run headless with no gesture, so keep audio off.
+  if (G.audio) G.audio.muted = true;
+  return shots;
 }
 
 export function update(G, dt) {
+  void G;
   void dt;
-  // Shots are static staging: nothing per-frame. The world clock and the
-  // normal game loop keep running so traffic, water and the sun stay alive.
-  if (!G.shotMode) return;
-  // Chase: hold the throttle so the getaway car keeps rolling at pursuit
-  // speed (and the speedometer reads motion) instead of coasting to a
-  // stop while the screenshot is framed. Staging-only: no gameplay module
-  // is touched, and the key is only held while this preset is staged.
-  if (G.shot === 'chase' && G.input && G.input.held) {
-    G.input.held.add('KeyW');
-  }
+  // Staging is one-shot; the running game needs no per-frame work.
+  // (Kept for the init/update module contract.)
 }
 
-export default { init, update, PRESETS };
+export default shots;

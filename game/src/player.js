@@ -1,487 +1,351 @@
-// player.js — Rook on foot: WASD movement, run, jump, enter/exit cars (E).
-// Extends the G.player object main.js already created (flat x/z, inVehicle
-// boolean + vehicle object, money, health) — it never replaces it, so the
-// engine, the save system and the screenshot stager keep working on the
-// same object. Positions live in p.pos {x, y, z} and are mirrored to p.x/p.z
-// every frame for the camera, the save and the stager. The THREE mesh only
-// mirrors the state; the movement math stays importable in plain Node.
+// player.js — Rook on foot: walk, run, jump, enter/exit vehicles.
+//
+// Owns G.player: position, heading, health, money and whether Rook is on
+// foot or driving. Vehicle physics live in vehicles.js; this module only
+// asks it to enter/exit through G.vehicles. Input is read through G.input
+// (Builder A's input.js) with a tolerant reader, so a Set, a plain object
+// or an array of pressed codes all work. Meshes are built only when the
+// THREE global exists, so the module imports cleanly in Node for tests.
 
-import * as configModule from './config.js';
-import * as randomModule from './random.js';
+export const WALK_SPEED = 4.2;
+export const RUN_SPEED = 7.0;
+export const JUMP_SPEED = 8.5;
+export const GRAVITY = 22;
+export const PLAYER_RADIUS = 0.55;
+export const ENTER_RADIUS = 3.6;
+export const HEALTH_MAX = 100;
+export const HEALTH_REGEN = 2.5; // per second, only while not recently hurt
+export const REGEN_DELAY = 5; // seconds after last damage before regen
 
-const CFG = configModule.CONFIG ?? configModule.default ?? {};
-const mulberry32 = randomModule.mulberry32 ?? randomModule.default ?? null;
-
-// ---------------------------------------------------------------- helpers
-
-/** Read a tuning value from G.cfg, falling back to `fallback`. */
-function cfg(G, key, fallback) {
-  const c = G.cfg ?? CFG;
-  const v = c == null ? undefined : c[key];
-  return v === undefined || v === null ? fallback : v;
-}
-
-/** Nested config section, e.g. section(G, 'PLAYER', {}). */
-function section(G, name, fallback) {
-  const c = G.cfg ?? CFG;
-  const s = c == null ? undefined : c[name];
-  return s === undefined || s === null ? fallback : s;
-}
-
-/** A callable RNG from G.rng (the createRng bundle) or a fresh mulberry32. */
-function rngFn(G) {
-  const r = G.rng;
-  if (typeof r === 'function') return r;
-  if (r && typeof r.next === 'function') return r.next;
-  if (mulberry32) return mulberry32(G.seed ?? 7);
-  return Math.random;
-}
-
-function three() {
-  return typeof globalThis !== 'undefined' ? globalThis.THREE : undefined;
-}
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-/** Map my sound names onto the audio module's real play() names. */
-const SOUND_MAP = {
-  hurt: 'crash', wasted: 'missionFail', door: 'doorSlam', steal: 'uiClick',
-  bump: 'crash', checkpoint: 'pickup', delivery: 'pickup', ambush: 'wantedUp',
-  cash: 'pickup', package: 'pickup', 'race-start': 'horn',
-  'race-win': 'missionComplete', 'race-lose': 'missionFail',
-  'mission-start': 'uiClick', 'mission-pass': 'missionComplete',
-  'mission-fail': 'missionFail', siren: 'wantedUp', busted: 'missionFail',
-  kill: 'pickup', 'shot-smg': 'shot', 'shot-enemy': 'shot', reload: 'reload',
-  crash: 'crash', shot: 'shot', engine: null, footstep: 'footstep',
-};
-
-function sfx(G, name) {
-  try {
-    const mapped = Object.prototype.hasOwnProperty.call(SOUND_MAP, name)
-      ? SOUND_MAP[name] : name;
-    if (mapped) G.audio?.play?.(mapped);
-  } catch (e) { /* audio is best-effort */ }
-}
-
-function emit(G, name, data) {
-  try {
-    G.events?.emit?.(name, data);
-  } catch (e) { /* events are best-effort */ }
-}
-
-/**
- * Is a key held? The input module exposes isDown(code) + a held Set; older
- * shapes (.keys object / .down fn) are accepted as a fallback.
- */
-function keyDown(G, code) {
-  const input = G.input;
-  if (!input) return false;
-  if (typeof input.isDown === 'function') {
-    try {
-      if (input.isDown(code)) return true;
-    } catch (e) { /* fall through */ }
-  }
-  if (input.held && typeof input.held.has === 'function' && input.held.has(code)) return true;
-  if (typeof input.down === 'function') {
-    try {
-      if (input.down(code)) return true;
-    } catch (e) { /* fall through */ }
-  }
-  const keys = input.keys;
-  return !!(keys && (keys[code] || keys[code.toLowerCase()]));
-}
-
-/**
- * Edge-triggered key: true only on the frame the key goes down. main.js
- * clears input.pressed before gameplay updates, so wasPressed() cannot be
- * trusted here — edges are tracked from the held set instead.
- */
-function keyPressed(G, code, prevHeld) {
-  return keyDown(G, code) && !(prevHeld && prevHeld.has(code));
-}
-
-/** Snapshot the currently held keys into a Set. */
-function snapshotHeld(G) {
-  const input = G.input;
-  const out = new Set();
-  if (!input) return out;
-  if (input.held && typeof input.held.forEach === 'function') {
-    input.held.forEach((k) => out.add(k));
-    return out;
-  }
-  if (input.keys) {
-    for (const k of Object.keys(input.keys)) if (input.keys[k]) out.add(k);
-  }
-  return out;
-}
-
-/** Movement axis {x: strafe, y: forward} from input.moveAxis() or keys. */
-function moveAxis(G) {
-  const input = G.input;
-  if (input && typeof input.moveAxis === 'function') {
-    try {
-      const a = input.moveAxis();
-      if (a && typeof a.x === 'number' && typeof a.y === 'number') return a;
-    } catch (e) { /* fall through */ }
-  }
+// Tuning comes from G.cfg (Builder A's config.js) when present; the
+// constants above are the standalone fallbacks used by tests.
+export function tuning(G) {
+  const c = (G && G.cfg && G.cfg.PLAYER) || {};
   return {
-    x: (keyDown(G, 'KeyD') || keyDown(G, 'ArrowRight') ? 1 : 0)
-      - (keyDown(G, 'KeyA') || keyDown(G, 'ArrowLeft') ? 1 : 0),
-    y: (keyDown(G, 'KeyW') || keyDown(G, 'ArrowUp') ? 1 : 0)
-      - (keyDown(G, 'KeyS') || keyDown(G, 'ArrowDown') ? 1 : 0),
+    walk: c.WALK_SPEED ?? WALK_SPEED,
+    run: c.RUN_SPEED ?? RUN_SPEED,
+    jump: c.JUMP_VEL ?? JUMP_SPEED,
+    gravity: c.GRAVITY ?? GRAVITY,
+    health: c.HEALTH ?? HEALTH_MAX,
   };
 }
 
-// ---------------------------------------------------------------- pure math (tested)
-
-/**
- * One on-foot step. Pure: no THREE, no DOM.
- * state: {pos, heading, speed, velY, onGround}
- * move: {forward, strafe, run, jump} in -1..1 / booleans
- * opts: {walkSpeed, runSpeed, jumpSpeed, gravity, accel}
- * Returns the mutated state (same object, for convenience).
- */
-export function stepOnFoot(state, move, dt, opts = {}) {
-  const walk = opts.walkSpeed ?? 4;
-  const run = opts.runSpeed ?? 8;
-  const jump = opts.jumpSpeed ?? 8.5;
-  const gravity = opts.gravity ?? 22;
-  const accel = opts.accel ?? 40;
-  const top = move.run ? run : walk;
-
-  // Desired velocity in world space, relative to the facing heading.
-  const f = { x: Math.sin(state.heading), z: Math.cos(state.heading) };
-  const r = { x: Math.cos(state.heading), z: -Math.sin(state.heading) };
-  const tx = (f.x * move.forward + r.x * move.strafe) * top;
-  const tz = (f.z * move.forward + r.z * move.strafe) * top;
-
-  const k = Math.min(1, accel * dt);
-  state.vx = (state.vx ?? 0) + (tx - (state.vx ?? 0)) * k;
-  state.vz = (state.vz ?? 0) + (tz - (state.vz ?? 0)) * k;
-  state.pos.x += state.vx * dt;
-  state.pos.z += state.vz * dt;
-  state.speed = Math.hypot(state.vx, state.vz);
-
-  // Facing follows movement when actually moving.
-  if (state.speed > 0.5) {
-    const target = Math.atan2(state.vx, state.vz);
-    let d = target - state.heading;
-    while (d > Math.PI) d -= Math.PI * 2;
-    while (d < -Math.PI) d += Math.PI * 2;
-    state.heading += clamp(d, -10 * dt, 10 * dt);
+// World bounds as {minX,maxX,minZ,maxZ}. Builder A's world.bounds is a
+// scalar half-extent (294); the harbour extends z to half + 130.
+export function boundsOf(G) {
+  const b = G && G.world ? G.world.bounds : undefined;
+  if (typeof b === 'number') return { minX: -b, maxX: b, minZ: -b, maxZ: b + 130 };
+  if (b && typeof b === 'object') {
+    return {
+      minX: b.minX ?? -294, maxX: b.maxX ?? 294,
+      minZ: b.minZ ?? -294, maxZ: b.maxZ ?? 424,
+    };
   }
-
-  // Jump / gravity, ground is y = 0.
-  if (move.jump && state.onGround) {
-    state.velY = jump;
-    state.onGround = false;
-  }
-  if (!state.onGround) {
-    state.velY -= gravity * dt;
-    state.pos.y += state.velY * dt;
-    if (state.pos.y <= 0) {
-      state.pos.y = 0;
-      state.velY = 0;
-      state.onGround = true;
-    }
-  }
-  return state;
+  return { minX: -294, maxX: 294, minZ: -294, maxZ: 424 };
 }
 
-/** Distance on the XZ plane between two {x, z} points. */
-export function flatDist(a, b) {
-  const dx = a.x - b.x;
-  const dz = a.z - b.z;
-  return Math.hypot(dx, dz);
+// --- input ---------------------------------------------------------------
+
+// True when any of the given codes is pressed. G.input may expose a Set
+// (`keys`), a plain object of booleans, an array, or per-action booleans.
+export function keyDown(G, ...codes) {
+  const input = G.input;
+  if (!input) return false;
+  if (typeof input.isDown === 'function') {
+    return codes.some((c) => input.isDown(c));
+  }
+  const keys = input.keys;
+  if (keys instanceof Set) return codes.some((c) => keys.has(c));
+  if (Array.isArray(keys)) return codes.some((c) => keys.includes(c));
+  if (keys && typeof keys === 'object') return codes.some((c) => keys[c] === true);
+  return codes.some((c) => input[c] === true);
 }
 
-/** The nearest vehicle to `pos` within `maxDist`, or null. */
-export function nearestVehicle(vehicles, pos, maxDist) {
+export function moveInput(G) {
+  return {
+    forward: keyDown(G, 'KeyW', 'ArrowUp'),
+    back: keyDown(G, 'KeyS', 'ArrowDown'),
+    left: keyDown(G, 'KeyA', 'ArrowLeft'),
+    right: keyDown(G, 'KeyD', 'ArrowRight'),
+    run: keyDown(G, 'ShiftLeft', 'ShiftRight'),
+    jump: keyDown(G, 'Space'),
+  };
+}
+
+// --- pure movement math (unit-testable, no G needed) ----------------------
+
+// Velocity (x, z) for a walk input, in world axes. W = -z, S = +z.
+export function walkVelocity(input, speed) {
+  let x = 0;
+  let z = 0;
+  if (input.forward) z -= 1;
+  if (input.back) z += 1;
+  if (input.left) x -= 1;
+  if (input.right) x += 1;
+  const len = Math.hypot(x, z);
+  if (len === 0) return { x: 0, z: 0, moving: false };
+  return { x: (x / len) * speed, z: (z / len) * speed, moving: true };
+}
+
+// One gravity step for a jump/fall. Returns { y, vy, grounded }.
+export function gravityStep(y, vy, dt, gravity = GRAVITY) {
+  const nextVy = vy - gravity * dt;
+  let nextY = y + nextVy * dt;
+  if (nextY <= 0) return { y: 0, vy: 0, grounded: true };
+  return { y: nextY, vy: nextVy, grounded: false };
+}
+
+export function clampToBounds(pos, bounds) {
+  const b = typeof bounds === 'number'
+    ? { minX: -bounds, maxX: bounds, minZ: -bounds, maxZ: bounds + 130 }
+    : (bounds ?? { minX: -294, maxX: 294, minZ: -294, maxZ: 424 });
+  pos.x = Math.max(b.minX, Math.min(b.maxX, pos.x));
+  pos.z = Math.max(b.minZ, Math.min(b.maxZ, pos.z));
+  return pos;
+}
+
+// --- money / health ------------------------------------------------------
+// Money and health are canonical on G itself (G.money, G.health — main.js
+// and save.js read and write them there). G.player.health mirrors
+// G.health for the HUD fallback and for tests without main.js.
+
+export function getMoney(G) {
+  return typeof G.money === 'number' ? G.money : 0;
+}
+
+export function getHealth(G) {
+  if (typeof G.health === 'number') return G.health;
+  if (G.player && typeof G.player.health === 'number') return G.player.health;
+  return HEALTH_MAX;
+}
+
+export function setHealth(G, value) {
+  const v = Math.max(0, Math.min(HEALTH_MAX, value));
+  G.health = v;
+  if (G.player) G.player.health = v;
+  return v;
+}
+
+export function addMoney(G, amount) {
+  G.money = Math.max(0, getMoney(G) + amount);
+  return G.money;
+}
+
+export function damagePlayer(G, amount, source) {
+  const p = G.player;
+  const hp = getHealth(G);
+  if (!p || hp <= 0 || G.state === 'wasted' || G.state === 'busted') return false;
+  setHealth(G, hp - amount);
+  p.lastDamageAt = G.time ? G.time.t : 0;
+  p.lastDamageSource = source ?? 'unknown';
+  if (G.hud && typeof G.hud.flashDamage === 'function') G.hud.flashDamage();
+  if (getHealth(G) <= 0) {
+    // State transitions belong to main.js: it listens for 'wasted' and
+    // shows the end screen. Never set G.state here.
+    emit(G, 'wasted', { source: p.lastDamageSource });
+    if (G.audio && typeof G.audio.play === 'function') G.audio.play('wasted');
+  }
+  return true;
+}
+
+export function healPlayer(G, amount) {
+  return setHealth(G, getHealth(G) + amount);
+}
+
+function emit(G, name, data) {
+  if (G.events && typeof G.events.emit === 'function') G.events.emit(name, data);
+}
+
+// --- vehicles ------------------------------------------------------------
+
+export function nearestVehicle(G, maxDist) {
+  const list = (G.vehicles && G.vehicles.list) || [];
+  const p = G.player.pos;
   let best = null;
   let bestD = maxDist;
-  for (const v of vehicles || []) {
-    if (!v || !v.pos) continue;
-    const d = flatDist(v.pos, pos);
+  for (const v of list) {
+    const d = Math.hypot(v.pos.x - p.x, v.pos.z - p.z);
     if (d < bestD) {
-      bestD = d;
       best = v;
+      bestD = d;
     }
   }
   return best;
 }
 
-// ---------------------------------------------------------------- mesh
+// E: enter the nearest car, or step out of the one being driven.
+export function tryEnterExitVehicle(G) {
+  const p = G.player;
+  if (!p.onFoot && p.vehicle) {
+    exitVehicle(G);
+    return 'exit';
+  }
+  if (!p.onFoot) return null;
+  const v = nearestVehicle(G, ENTER_RADIUS);
+  if (!v) return null;
+  enterVehicle(G, v);
+  return 'enter';
+}
 
-function buildPlayerMesh(G) {
-  const T = three();
-  if (!T) return null;
-  const group = new T.Group();
-  const jacket = cfg(G, 'PLAYER_JACKET_COLOR', 0x27324a);
-  const skin = cfg(G, 'PLAYER_SKIN_COLOR', 0xc9976b);
-  const pants = cfg(G, 'PLAYER_PANTS_COLOR', 0x1c1c22);
-  const body = new T.Mesh(
-    new T.BoxGeometry(0.55, 0.75, 0.32),
-    new T.MeshLambertMaterial({ color: jacket }),
+export function enterVehicle(G, v) {
+  const p = G.player;
+  const wasStolen = !v.owned;
+  p.onFoot = false;
+  p.vehicle = v;
+  v.driver = 'player';
+  if (G.vehicles) G.vehicles.playerVehicle = v;
+  if (wasStolen) {
+    v.owned = true; // Rook keeps what he takes — until the cops notice.
+    if (G.stats) G.stats.carsStolen = (G.stats.carsStolen ?? 0) + 1;
+    if (G.police && typeof G.police.addHeat === 'function') G.police.addHeat(25, 'theft');
+    emit(G, 'car-stolen', { model: v.model });
+    if (G.audio && typeof G.audio.play === 'function') G.audio.play('steal');
+    if (G.hud && typeof G.hud.showMessage === 'function') {
+      G.hud.showMessage('Car stolen — the cops noticed!');
+    }
+  }
+  if (G.audio && typeof G.audio.play === 'function') G.audio.play('door');
+}
+
+export function exitVehicle(G) {
+  const p = G.player;
+  const v = p.vehicle;
+  if (!v) return;
+  // Step out to the driver's side, clear of the car body.
+  const side = { x: Math.cos(v.heading + Math.PI / 2), z: -Math.sin(v.heading + Math.PI / 2) };
+  p.pos.x = v.pos.x + side.x * 2.2;
+  p.pos.y = 0;
+  p.pos.z = v.pos.z + side.z * 2.2;
+  p.heading = v.heading;
+  p.onFoot = true;
+  p.vehicle = null;
+  v.driver = null;
+  if (G.vehicles) G.vehicles.playerVehicle = null;
+  if (G.world && typeof G.world.collide === 'function') G.world.collide(p.pos, PLAYER_RADIUS);
+  if (G.audio && typeof G.audio.play === 'function') G.audio.play('door');
+}
+
+// --- mesh (THREE only when the global exists) ----------------------------
+
+function buildMesh(G) {
+  if (typeof THREE === 'undefined') return null;
+  const group = new THREE.Group();
+  const jacket = new THREE.Mesh(
+    new THREE.BoxGeometry(0.7, 0.9, 0.4),
+    new THREE.MeshStandardMaterial({ color: 0x8a2f2f }),
   );
-  body.position.y = 1.05;
-  const head = new T.Mesh(
-    new T.BoxGeometry(0.34, 0.34, 0.34),
-    new T.MeshLambertMaterial({ color: skin }),
+  jacket.position.y = 1.05;
+  const head = new THREE.Mesh(
+    new THREE.BoxGeometry(0.42, 0.42, 0.42),
+    new THREE.MeshStandardMaterial({ color: 0xd9a066 }),
   );
-  head.position.y = 1.62;
-  const legL = new T.Mesh(
-    new T.BoxGeometry(0.2, 0.65, 0.22),
-    new T.MeshLambertMaterial({ color: pants }),
+  head.position.y = 1.75;
+  const legs = new THREE.Mesh(
+    new THREE.BoxGeometry(0.6, 0.7, 0.35),
+    new THREE.MeshStandardMaterial({ color: 0x222831 }),
   );
-  legL.position.set(-0.14, 0.33, 0);
-  const legR = legL.clone();
-  legR.position.x = 0.14;
-  const armL = new T.Mesh(
-    new T.BoxGeometry(0.16, 0.6, 0.18),
-    new T.MeshLambertMaterial({ color: jacket }),
-  );
-  armL.position.set(-0.37, 1.05, 0);
-  const armR = armL.clone();
-  armR.position.x = 0.37;
-  group.add(body, head, legL, legR, armL, armR);
-  group.userData.legL = legL;
-  group.userData.legR = legR;
-  group.userData.armL = armL;
-  group.userData.armR = armR;
-  group.traverse((o) => { o.castShadow = true; });
+  legs.position.y = 0.35;
+  group.add(jacket, head, legs);
+  if (G.scene) G.scene.add(group);
   return group;
 }
 
-// ---------------------------------------------------------------- module
+// --- lifecycle -----------------------------------------------------------
 
 export function init(G) {
-  // Extend main.js's player object; never replace it (save/load, the
-  // camera and the screenshot stager all hold the same reference).
-  const p = G.player ?? {};
-  G.player = p;
-  const pcfg = section(G, 'PLAYER', {});
-  const startX = typeof p.x === 'number' ? p.x : 6;
-  const startZ = typeof p.z === 'number' ? p.z : 6;
-  if (typeof p.heading !== 'number') p.heading = Math.PI * 0.75;
-  if (typeof p.health !== 'number') p.health = pcfg.maxHealth ?? 100;
-  if (typeof p.money !== 'number') p.money = cfg(G, 'START_MONEY', 0);
-  if (typeof p.onFoot !== 'boolean') p.onFoot = true;
-  if (typeof p.inVehicle !== 'boolean') p.inVehicle = false;
-  if (!('vehicle' in p)) p.vehicle = null;
-
-  p.pos = { x: startX, y: 0, z: startZ };
-  p.x = startX;
-  p.z = startZ;
-  p.vx = 0;
-  p.vz = 0;
-  p.velY = 0;
-  p.speed = 0;
-  p.onGround = true;
-  p.maxHealth = pcfg.maxHealth ?? 100;
-  p.weapon = 'pistol';
-  p.ammo = { pistol: 48, smg: 120 };
-  p.mag = { pistol: 12, smg: 30 };
-  p.magSize = { pistol: 12, smg: 30 };
-  p.walkSpeed = pcfg.walkSpeed ?? 5.2;
-  p.runSpeed = pcfg.runSpeed ?? 9.0;
-  p.jumpSpeed = pcfg.jumpSpeed ?? 7.5;
-  p.gravity = 22;
-  p.lastDamageAt = -999;
-  p.regenDelay = cfg(G, 'PLAYER_REGEN_DELAY', 5);
-  p._prevHeld = new Set();
-  p._walkPhase = 0;
-  p._rng = rngFn(G);
-  p.mesh = null;
-
-  /** Damage the player; returns true when this damage wastes them. */
-  p.damage = function damage(amount, source) {
-    if (p.inVehicle && p.vehicle) amount *= 0.5; // the car takes the edge off
-    p.health = Math.max(0, p.health - amount);
-    p.lastDamageAt = G.time ? G.time.t : 0;
-    emit(G, 'player-damaged', { amount, source: source || 'unknown', health: p.health });
-    sfx(G, 'hurt');
-    if (p.health <= 0) p.wasted();
-    return p.health <= 0;
+  const tune = tuning(G);
+  // Spawn at Meridian Plaza (the world's spawn landmark) when the world
+  // provides it; a random road spot otherwise.
+  const lm = G.world && G.world.landmarks;
+  const start = lm && lm.spawn
+    ? { x: lm.spawn.x, z: lm.spawn.z }
+    : (G.world && typeof G.world.randomRoadPos === 'function')
+      ? G.world.randomRoadPos(G.rng)
+      : { x: 0, z: 0 };
+  if (typeof G.health !== 'number') G.health = tune.health;
+  // Replace the (frozen) module namespace on G with the live player
+  // object: state fields plus the update() the main loop calls on it.
+  G.player = {
+    pos: { x: start.x, y: 0, z: start.z },
+    heading: Math.PI,
+    speed: 0,
+    onFoot: true,
+    vehicle: null,
+    health: G.health,
+    vy: 0,
+    grounded: true,
+    lastDamageAt: -99,
+    lastDamageSource: null,
+    mesh: null,
+    moving: false,
+    update,
+    enterVehicle: (v) => enterVehicle(G, v),
+    exitVehicle: () => exitVehicle(G),
   };
-
-  /** Put the player down: main.js listens for 'wasted' and shows the end screen. */
-  p.wasted = function wasted() {
-    if (G.state === 'wasted') return;
-    if (p.vehicle) p.exitVehicle();
-    emit(G, 'wasted', { money: p.money });
-    G.state = 'wasted';
-    sfx(G, 'wasted');
-    if (G.missions?.onPlayerDown) G.missions.onPlayerDown('wasted');
-  };
-
-  /** Heal, clamped to maxHealth. */
-  p.heal = function heal(amount) {
-    p.health = Math.min(p.maxHealth, p.health + amount);
-  };
-
-  /** Enter a vehicle (called by vehicles.js too, via G). */
-  p.enterVehicle = function enterVehicle(vehicle) {
-    if (!vehicle) return false;
-    p.vehicle = vehicle;
-    p.inVehicle = true;
-    p.onFoot = false;
-    vehicle.driver = 'player';
-    if (p.mesh) p.mesh.visible = false;
-    emit(G, 'player-entered-vehicle', { vehicleId: vehicle.id });
-    sfx(G, 'door');
-    return true;
-  };
-
-  /** Step out of the current vehicle, to its side. */
-  p.exitVehicle = function exitVehicle() {
-    const v = p.vehicle;
-    if (!v) return false;
-    const side = { x: Math.cos(v.heading), z: -Math.sin(v.heading) };
-    p.pos.x = v.pos.x + side.x * 2.2;
-    p.pos.y = 0;
-    p.pos.z = v.pos.z + side.z * 2.2;
-    p.x = p.pos.x;
-    p.z = p.pos.z;
-    p.heading = v.heading;
-    p.vehicle = null;
-    p.inVehicle = false;
-    p.onFoot = true;
-    v.driver = 'none';
-    if (p.mesh) p.mesh.visible = true;
-    emit(G, 'player-exited-vehicle', { vehicleId: v.id });
-    sfx(G, 'door');
-    return true;
-  };
-
-  const mesh = buildPlayerMesh(G);
-  if (mesh) {
-    mesh.position.set(p.pos.x, 0, p.pos.z);
-    p.mesh = mesh;
-    G.scene?.add?.(mesh);
-  }
-  return p;
+  G.player.mesh = buildMesh(G);
+  return G.player;
 }
 
 export function update(G, dt) {
   const p = G.player;
-  if (!p || G.state !== 'playing') {
-    if (p) p._prevHeld = snapshotHeld(G);
-    return;
-  }
-  dt = Math.min(dt, 0.05);
+  if (!p || G.state !== 'playing') return;
 
-  // Adopt external position writes (save load, menu restart, screenshot
-  // staging all write p.x / p.z between frames).
-  if (typeof p.x === 'number' && typeof p.z === 'number'
-    && (p.x !== p.pos.x || p.z !== p.pos.z) && !(p.inVehicle && p.vehicle)) {
-    p.pos.x = p.x;
-    p.pos.z = p.z;
+  // E: enter / exit the nearest car (edge-triggered via justPressed).
+  if (G.input && G.input.justPressed && G.input.justPressed.KeyE) {
+    tryEnterExitVehicle(G);
   }
 
-  // Health regen after a quiet spell.
-  const t = G.time ? G.time.t : 0;
-  if (p.health > 0 && p.health < p.maxHealth && t - p.lastDamageAt > p.regenDelay) {
-    p.heal(6 * dt);
-  }
-
-  const driving = !!(p.inVehicle && p.vehicle);
-  p.onFoot = !driving;
-  if (driving) {
-    // Riding: the player sits where the car is; the car module drives.
+  if (!p.onFoot && p.vehicle) {
+    // Driving: the car owns the position; Rook rides along.
     p.pos.x = p.vehicle.pos.x;
-    p.pos.y = 0;
     p.pos.z = p.vehicle.pos.z;
-    p.x = p.pos.x;
-    p.z = p.pos.z;
+    p.pos.y = 0;
     p.heading = p.vehicle.heading;
-    if (p.mesh) {
-      p.mesh.visible = false;
-      p.mesh.position.set(p.pos.x, 0, p.pos.z);
-    }
-    // E exits the car (edge-triggered, tracked here — the only E handler).
-    if (keyPressed(G, 'KeyE', p._prevHeld)) p.exitVehicle();
-    p._prevHeld = snapshotHeld(G);
+    p.speed = Math.abs(p.vehicle.speed ?? 0);
+    if (p.mesh) p.mesh.visible = false;
     return;
   }
+  if (p.mesh) p.mesh.visible = true;
 
-  const axis = moveAxis(G);
-  const move = {
-    forward: axis.y,
-    strafe: axis.x,
-    run: (G.input && typeof G.input.isRunning === 'function')
-      ? G.input.isRunning()
-      : keyDown(G, 'ShiftLeft') || keyDown(G, 'ShiftRight'),
-    jump: keyDown(G, 'Space'),
-  };
-  stepOnFoot(p, move, dt, {
-    walkSpeed: p.walkSpeed,
-    runSpeed: p.runSpeed,
-    jumpSpeed: p.jumpSpeed,
-    gravity: p.gravity,
-  });
+  const tune = tuning(G);
+  const input = moveInput(G);
+  const speed = input.run ? tune.run : tune.walk;
+  const vel = walkVelocity(input, speed);
+  p.moving = vel.moving;
+  p.speed = vel.moving ? speed : 0;
+  if (vel.moving) p.heading = Math.atan2(vel.x, -vel.z);
 
-  // Buildings push the player out (world.collide mutates pos in place).
-  if (G.world?.collide) {
-    try {
-      G.world.collide(p.pos, 0.6);
-    } catch (e) { /* collision is best-effort */ }
+  p.pos.x += vel.x * dt;
+  p.pos.z += vel.z * dt;
+
+  // Jump / fall.
+  if (input.jump && p.grounded) {
+    p.vy = tune.jump;
+    p.grounded = false;
   }
-  // Stay inside the city bounds.
-  const half = cfg(G, 'CITY_HALF', 288);
-  p.pos.x = clamp(p.pos.x, -half, half);
-  p.pos.z = clamp(p.pos.z, -half, half);
-
-  // Enter a car with E (edge-triggered).
-  if (keyPressed(G, 'KeyE', p._prevHeld)) {
-    const near = nearestVehicle(G.vehicles?.list, p.pos, cfg(G, 'ENTER_CAR_DIST', 4));
-    if (near) {
-      if (near.driver && near.driver !== 'none' && near.driver !== 'player') {
-        // Stealing an occupied car: yank the driver out, attract attention.
-        if (G.vehicles?.steal) G.vehicles.steal(near);
-        else p.enterVehicle(near);
-      } else {
-        p.enterVehicle(near);
-      }
-      emit(G, 'car-entered', { vehicleId: near.id, stolen: !!near.stolen });
-    }
+  if (!p.grounded || p.pos.y > 0) {
+    const step = gravityStep(p.pos.y, p.vy, dt, tune.gravity);
+    p.pos.y = step.y;
+    p.vy = step.vy;
+    p.grounded = step.grounded;
   }
 
-  // Weapon switch (1 pistol, 2 SMG).
-  if (keyPressed(G, 'Digit1', p._prevHeld)) {
-    p.weapon = 'pistol';
-    emit(G, 'weapon-changed', { weapon: 'pistol' });
-  }
-  if (keyPressed(G, 'Digit2', p._prevHeld) && (p.ammo.smg > 0 || p.mag.smg > 0)) {
-    p.weapon = 'smg';
-    emit(G, 'weapon-changed', { weapon: 'smg' });
+  if (G.world) {
+    if (typeof G.world.collide === 'function') G.world.collide(p.pos, PLAYER_RADIUS);
+    clampToBounds(p.pos, boundsOf(G));
   }
 
-  // Mirror the position back to the flat fields the engine reads.
-  p.x = p.pos.x;
-  p.z = p.pos.z;
+  // Slow health regen after a quiet spell (canonical health lives on G).
+  const now = G.time ? G.time.t : 0;
+  const hp = getHealth(G);
+  if (hp > 0 && hp < HEALTH_MAX && now - p.lastDamageAt > REGEN_DELAY) {
+    setHealth(G, hp + HEALTH_REGEN * dt);
+  }
 
-  // Walk-cycle animation on the mesh.
   if (p.mesh) {
     p.mesh.position.set(p.pos.x, p.pos.y, p.pos.z);
     p.mesh.rotation.y = p.heading;
-    if (p.speed > 0.5) {
-      p._walkPhase += dt * p.speed * 1.6;
-      const s = Math.sin(p._walkPhase) * 0.55;
-      const u = p.mesh.userData;
-      if (u.legL) u.legL.rotation.x = s;
-      if (u.legR) u.legR.rotation.x = -s;
-      if (u.armL) u.armL.rotation.x = -s * 0.8;
-      if (u.armR) u.armR.rotation.x = s * 0.8;
-    } else {
-      const u = p.mesh.userData;
-      if (u.legL) u.legL.rotation.x = 0;
-      if (u.legR) u.legR.rotation.x = 0;
-      if (u.armL) u.armL.rotation.x = 0;
-      if (u.armR) u.armR.rotation.x = 0;
-    }
+    // Simple walk bob so the run reads on screen.
+    p.mesh.position.y = p.pos.y + (p.moving ? Math.abs(Math.sin(now * 11)) * 0.06 : 0);
   }
-
-  p._prevHeld = snapshotHeld(G);
 }

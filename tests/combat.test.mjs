@@ -1,148 +1,209 @@
-// Combat: weapon stats, firing cone, target picking, damage falloff,
-// enemy AI and the reload cycle.
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  WEAPONS, ENEMY_KINDS, weaponStats, inFiringCone, pickTarget,
-  damageAtRange, init, update,
-} from '../game/src/combat.js';
-import { init as initPlayer } from '../game/src/player.js';
-import { installThreeStub, makeG } from './helpers.mjs';
+import * as combat from '../game/src/combat.js';
+import * as vehicles from '../game/src/vehicles.js';
+import * as player from '../game/src/player.js';
+import { makeG, wireMainEffects } from './helpers.mjs';
 
-installThreeStub();
-
-test('combat: weapon stats exist for pistol and SMG', () => {
-  assert.ok(WEAPONS.pistol.damage > WEAPONS.smg.damage, 'pistol hits harder');
-  assert.ok(WEAPONS.smg.rate < WEAPONS.pistol.rate, 'SMG fires faster');
-  assert.equal(WEAPONS.pistol.magSize, 12);
-  assert.equal(WEAPONS.smg.magSize, 30);
-  assert.equal(weaponStats('nope'), WEAPONS.pistol, 'unknown weapon falls back');
-});
-
-test('combat: enemy kinds scale up to the boss', () => {
-  assert.ok(ENEMY_KINDS.boss.health > ENEMY_KINDS.bruiser.health);
-  assert.ok(ENEMY_KINDS.bruiser.health > ENEMY_KINDS.gunman.health);
-  assert.ok(ENEMY_KINDS.boss.damage > ENEMY_KINDS.gunman.damage);
-});
-
-test('combat: inFiringCone accepts straight-ahead targets in range', () => {
-  assert.equal(inFiringCone({ x: 0, z: 0 }, 0, { x: 0, z: 10 }, 60, 0.22), true);
-  assert.equal(inFiringCone({ x: 0, z: 0 }, 0, { x: 0, z: 70 }, 60, 0.22), false);
-  assert.equal(inFiringCone({ x: 0, z: 0 }, 0, { x: 10, z: 0 }, 60, 0.22), false);
-  assert.equal(inFiringCone({ x: 0, z: 0 }, 0, { x: 0, z: -10 }, 60, 0.22), false);
-});
-
-test('combat: pickTarget takes the nearest enemy in the cone', () => {
-  const enemies = [
-    { pos: { x: 0, z: 20 }, health: 50 },
-    { pos: { x: 0, z: 8 }, health: 50 },
-    { pos: { x: 30, z: 0 }, health: 50 },
-    { pos: { x: 0, z: 5 }, health: 0 },
-  ];
-  const t = pickTarget({ x: 0, z: 0 }, 0, enemies, 60, 0.22);
-  assert.equal(t, enemies[1], 'nearest live target in the cone');
-  assert.equal(pickTarget({ x: 0, z: 0 }, 0, [], 60, 0.22), null);
-});
-
-test('combat: damageAtRange falls off past half range', () => {
-  assert.equal(damageAtRange(25, 10, 60), 25);
-  assert.equal(damageAtRange(25, 30, 60), 25);
-  const far = damageAtRange(25, 55, 60);
-  assert.ok(far < 25 && far >= 1);
-  assert.equal(damageAtRange(25, 60, 60), 13);
-});
-
-test('combat: spawnEnemy creates a gunman with a mesh', () => {
+function bootedG() {
   const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  const e = c.spawnEnemy({ x: 10, z: 10, kind: 'gunman' });
-  assert.equal(e.health, 50);
-  assert.equal(e.kind, 'gunman');
-  assert.ok(e.mesh);
-  assert.equal(c.enemies.length, 1);
+  wireMainEffects(G);
+  vehicles.init(G);
+  player.init(G);
+  combat.init(G);
+  G.hud = { showMessage: () => {} };
+  return G;
+}
+
+describe('shootRay', () => {
+  const origin = { x: 0, y: 0, z: 0 };
+  const dir = { x: 0, z: -1 };
+  it('hits a target straight ahead', () => {
+    const t = { pos: { x: 0, z: -10 }, radius: 1 };
+    const hit = combat.shootRay(origin, dir, [t], 60);
+    assert.equal(hit.target, t);
+    assert.equal(hit.dist, 10);
+  });
+  it('misses a target off to the side', () => {
+    const t = { pos: { x: 5, z: -10 }, radius: 1 };
+    assert.equal(combat.shootRay(origin, dir, [t], 60), null);
+  });
+  it('misses a target behind the shooter', () => {
+    const t = { pos: { x: 0, z: 10 }, radius: 1 };
+    assert.equal(combat.shootRay(origin, dir, [t], 60), null);
+  });
+  it('misses beyond the range', () => {
+    const t = { pos: { x: 0, z: -70 }, radius: 1 };
+    assert.equal(combat.shootRay(origin, dir, [t], 60), null);
+  });
+  it('returns the nearest of several targets', () => {
+    const near = { pos: { x: 0, z: -8 }, radius: 1 };
+    const far = { pos: { x: 0, z: -20 }, radius: 1 };
+    const hit = combat.shootRay(origin, dir, [far, near], 60);
+    assert.equal(hit.target, near);
+  });
+  it('respects the target radius', () => {
+    const edge = { pos: { x: 0.9, z: -10 }, radius: 1 };
+    assert.ok(combat.shootRay(origin, dir, [edge], 60));
+    const out = { pos: { x: 1.1, z: -10 }, radius: 1 };
+    assert.equal(combat.shootRay(origin, dir, [out], 60), null);
+  });
+  it('returns null with no targets', () => {
+    assert.equal(combat.shootRay(origin, dir, [], 60), null);
+  });
 });
 
-test('combat: shoot hits the enemy in front and spends a round', () => {
-  const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  const e = c.spawnEnemy({ x: 0, z: 10, kind: 'gunman' });
-  G.player.pos.x = 0;
-  G.player.pos.z = 0;
-  G.player.x = 0;
-  G.player.z = 0;
-  G.player.heading = 0;
-  const mag0 = G.player.mag.pistol;
-  assert.equal(c.shoot(), true);
-  assert.equal(G.player.mag.pistol, mag0 - 1);
-  assert.ok(e.health < 50, `enemy health=${e.health}`);
+describe('applySpread', () => {
+  it('keeps the direction roughly with zero spread', () => {
+    const d = combat.applySpread({ x: 0, z: -1 }, 0, null);
+    assert.ok(Math.abs(d.x) < 1e-9 && Math.abs(d.z + 1) < 1e-9);
+  });
+  it('returns a unit vector with spread', () => {
+    for (let i = 0; i < 20; i++) {
+      const d = combat.applySpread({ x: 0, z: -1 }, 0.07, null);
+      assert.ok(Math.abs(Math.hypot(d.x, d.z) - 1) < 1e-9);
+    }
+  });
 });
 
-test('combat: shoot respects the fire rate', () => {
-  const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  assert.equal(c.shoot(), true);
-  assert.equal(c.shoot(), false, 'still cooling down');
-  for (let i = 0; i < 30; i++) update(G, 1 / 60);
-  assert.equal(c.shoot(), true, 'ready again after the cooldown');
+describe('enemyHitChance', () => {
+  it('is high up close and zero past range', () => {
+    assert.equal(combat.enemyHitChance(5), 0.55);
+    assert.equal(combat.enemyHitChance(100), 0);
+    const mid = combat.enemyHitChance(24);
+    assert.ok(mid > 0.15 && mid < 0.55);
+  });
 });
 
-test('combat: empty magazine starts a reload that refills it', () => {
-  const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  G.player.mag.pistol = 1;
-  G.player.ammo.pistol = 48;
-  assert.equal(c.shoot(), true);
-  assert.equal(G.player.mag.pistol, 0);
-  assert.equal(c.shoot(), false, 'dry: starts reloading instead');
-  assert.equal(c.reloading, true);
-  for (let i = 0; i < 90; i++) update(G, 1 / 60);
-  assert.equal(c.reloading, false);
-  assert.ok(G.player.mag.pistol > 0, 'magazine refilled');
-  assert.ok(G.player.ammo.pistol < 48, 'reserve spent');
+describe('tuning', () => {
+  it('reads G.cfg.COMBAT when present', () => {
+    const t = combat.tuning(makeG());
+    assert.equal(t.weapons.pistol.damage, 34);
+    assert.equal(t.weapons.smg.damage, 18);
+    assert.equal(t.enemyHealth, 60);
+    assert.equal(t.enemyRange, 38);
+  });
+  it('falls back without cfg', () => {
+    const t = combat.tuning({});
+    assert.equal(t.weapons.pistol.damage, combat.WEAPONS.pistol.damage);
+    assert.equal(t.enemyHealth, combat.ENEMY_HEALTH);
+  });
 });
 
-test('combat: damageEnemy kills at zero health and pays a bounty', () => {
-  const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  const e = c.spawnEnemy({ x: 5, z: 5, kind: 'gunman' });
-  const money0 = G.player.money;
-  assert.equal(c.damageEnemy(e, 49), false);
-  assert.equal(c.damageEnemy(e, 1), true);
-  assert.equal(c.enemies.length, 0);
-  assert.equal(G.player.money, money0 + 75);
+describe('enemies', () => {
+  it('spawns with cfg health and dies from damage', () => {
+    const G = bootedG();
+    const e = combat.spawnEnemy(G, 10, 10, { kind: 'kroll' });
+    assert.equal(e.health, 60);
+    assert.equal(e.alive, true);
+    assert.equal(G.combat.enemies.length, 1);
+    assert.equal(combat.damageEnemy(G, e, 30), true);
+    assert.equal(e.health, 30);
+    combat.damageEnemy(G, e, 30);
+    assert.equal(e.alive, false);
+    assert.ok(G.events.emitted.some((x) => x.type === 'enemy-down'));
+  });
+  it('damageEnemy refuses a dead enemy', () => {
+    const G = bootedG();
+    const e = combat.spawnEnemy(G, 0, 0);
+    combat.damageEnemy(G, e, 999);
+    assert.equal(combat.damageEnemy(G, e, 10), false);
+  });
+  it('dead enemies are dropped from the list on update', () => {
+    const G = bootedG();
+    const e = combat.spawnEnemy(G, 0, 0);
+    combat.damageEnemy(G, e, 999);
+    combat.update(G, 0.1);
+    assert.equal(G.combat.enemies.length, 0);
+  });
 });
 
-test('combat: enemies advance toward the player and shoot', () => {
-  const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  // Player stands at (-18, 108); put the gunman 40 m away — outside its
-  // hold-and-strafe band (0.8 * range 35 = 28 m) so it has to advance.
-  const e = c.spawnEnemy({ x: -18, z: 68, kind: 'gunman' });
-  e.fireTimer = 0.01;
-  e.fireInterval = 0.2;
-  e.accuracy = 1;
-  const d0 = Math.hypot(e.pos.x - G.player.pos.x, e.pos.z - G.player.pos.z);
-  const hp0 = G.player.health;
-  for (let i = 0; i < 300; i++) update(G, 1 / 60);
-  const d1 = Math.hypot(e.pos.x - G.player.pos.x, e.pos.z - G.player.pos.z);
-  assert.ok(d1 < d0, `enemy closed in: ${d0} -> ${d1.toFixed(1)}`);
-  assert.ok(G.player.health < hp0, 'enemy fire hurt the player');
+describe('applyDamageToPlayer', () => {
+  it('lowers G.health and emits wasted at zero without setting state', () => {
+    const G = bootedG();
+    assert.equal(combat.applyDamageToPlayer(G, 25, 'kroll'), true);
+    assert.equal(G.health, 75);
+    combat.applyDamageToPlayer(G, 100, 'kroll');
+    assert.equal(G.health, 0);
+    assert.equal(G.state, 'wasted'); // wired main.js effect
+    assert.ok(G.events.emitted.some((e) => e.type === 'wasted'));
+  });
+  it('refuses damage when already wasted', () => {
+    const G = bootedG();
+    G.state = 'wasted';
+    assert.equal(combat.applyDamageToPlayer(G, 10), false);
+  });
 });
 
-test('combat: an enemy inside its strafe band holds distance', () => {
-  const G = makeG();
-  initPlayer(G);
-  const c = init(G);
-  // 10 m away: inside the gunman's hold band (0.8 * range 35 = 28 m).
-  const e = c.spawnEnemy({ x: -18, z: 98, kind: 'gunman' });
-  const d0 = Math.hypot(e.pos.x - G.player.pos.x, e.pos.z - G.player.pos.z);
-  for (let i = 0; i < 120; i++) update(G, 1 / 60);
-  const d1 = Math.hypot(e.pos.x - G.player.pos.x, e.pos.z - G.player.pos.z);
-  assert.ok(d1 > 6 && d1 < 14, `enemy held at ${d0} -> ${d1.toFixed(1)} m`);
+describe('player shooting', () => {
+  it('fires on mouseDown, spends ammo and hits an enemy ahead', () => {
+    const G = bootedG();
+    G.player.heading = 0; // faces -z
+    const e = combat.spawnEnemy(G, G.player.pos.x, G.player.pos.z - 10);
+    const ammoBefore = G.combat.ammo;
+    G.input.mouseDown = true;
+    combat.update(G, 0.016);
+    assert.equal(G.combat.ammo, ammoBefore - 1);
+    assert.ok(e.health < 60);
+    assert.ok(G.audio.played.includes('shot'));
+  });
+  it('does not fire without input', () => {
+    const G = bootedG();
+    const ammoBefore = G.combat.ammo;
+    combat.update(G, 0.5);
+    assert.equal(G.combat.ammo, ammoBefore);
+  });
+  it('respects the fire rate', () => {
+    const G = bootedG();
+    G.input.mouseDown = true;
+    combat.update(G, 0.016);
+    const ammoAfterFirst = G.combat.ammo;
+    combat.update(G, 0.016);
+    assert.equal(G.combat.ammo, ammoAfterFirst); // still cooling down
+    combat.update(G, 0.5);
+    assert.equal(G.combat.ammo, ammoAfterFirst - 1);
+  });
+  it('dry-fires with an empty magazine', () => {
+    const G = bootedG();
+    G.combat.ammo = 0;
+    G.input.mouseDown = true;
+    combat.update(G, 0.016);
+    assert.equal(G.combat.ammo, 0);
+    assert.ok(G.audio.played.includes('dryfire'));
+  });
+  it('reloads with R', () => {
+    const G = bootedG();
+    G.combat.ammo = 3;
+    G.input.justPressed = { KeyR: true };
+    combat.update(G, 0.016);
+    assert.equal(G.combat.ammo, 12);
+    assert.ok(G.audio.played.includes('reload'));
+  });
+  it('switches weapons with 2 and Q', () => {
+    const G = bootedG();
+    G.input.justPressed = { Digit2: true };
+    combat.update(G, 0.016);
+    assert.equal(G.combat.weapon, 'smg');
+    assert.equal(G.combat.ammo, 30);
+    G.input.justPressed = { KeyQ: true };
+    combat.update(G, 0.016);
+    assert.equal(G.combat.weapon, 'pistol');
+  });
+  it('enemy AI shoots the player when in range', () => {
+    const G = bootedG();
+    combat.spawnEnemy(G, G.player.pos.x, G.player.pos.z - 5);
+    const hp = G.health;
+    for (let i = 0; i < 200; i++) {
+      combat.update(G, 0.05);
+      G.time.t += 0.05;
+      if (G.health < hp) break;
+    }
+    assert.ok(G.health < hp, 'expected the enemy to land a hit');
+  });
+  it('enemy AI never hits beyond its range', () => {
+    const G = bootedG();
+    combat.spawnEnemy(G, G.player.pos.x, G.player.pos.z - 100);
+    for (let i = 0; i < 100; i++) combat.update(G, 0.05);
+    assert.equal(G.health, 100);
+  });
 });

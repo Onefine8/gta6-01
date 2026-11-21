@@ -1,131 +1,110 @@
-// Meridian Heat — save / load via localStorage.
-// Stores progress, money, mission states, player position and side-activity
-// tallies. Pure JSON; a corrupt or missing save loads as a fresh game.
-// Only imports config.js; no other module is touched.
-import { CONFIG } from './config.js';
+// Meridian Heat — save / load (localStorage).
+// Stores progress only: money, health, missions, packages, position,
+// time of day and wanted level. No secrets, no credentials.
 
-const cfg = CONFIG;
+import { CFG } from './config.js';
 
-let autosaveTimer = 0;
+export const save = {
+  key: CFG.SAVE_KEY,
+  has: false,
+};
 
-function defaultSave() {
+function collect(G) {
+  const p = G.player || {};
+  const pos = p.pos || { x: 0, z: 0 };
   return {
     version: 1,
-    money: cfg.START_MONEY,
-    health: cfg.PLAYER.maxHealth,
-    missionsCompleted: [],
-    currentMission: 0,
-    packagesFound: 0,
-    racesWon: 0,
-    taxiDone: 0,
-    player: { x: -18, z: 108, heading: Math.PI },
-    dayTime: cfg.START_DAY_TIME,
-    createdAt: Date.now(),
+    savedAt: new Date().toISOString(),
+    money: G.money || 0,
+    health: G.health ?? 100,
+    wanted: (G.police && G.police.wanted) || 0,
+    dayTime: G.time ? G.time.dayTime : CFG.WORLD.START_DAY_TIME,
+    seed: G.seed,
+    player: {
+      x: pos.x, z: pos.z,
+      heading: p.heading || 0,
+      onFoot: p.onFoot !== false,
+    },
+    missionsDone: (G.missions && G.missions.done) ? [...G.missions.done] : [],
+    currentMission: (G.missions && G.missions.current) || 0,
+    packages: (G.activities && G.activities.packagesFound)
+      ? [...G.activities.packagesFound] : [],
+    taxiDone: (G.activities && G.activities.taxiDone) || 0,
+    racesWon: (G.activities && G.activities.racesWon) || 0,
+    stats: (G.stats) ? { ...G.stats } : {},
   };
 }
 
-function readRaw() {
-  try {
-    const raw = window.localStorage.getItem(cfg.SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!data || typeof data !== 'object' || data.version !== 1) return null;
-    return data;
-  } catch (e) {
-    return null; // corrupt save: start fresh, never crash the boot
+function apply(G, data) {
+  G.money = data.money ?? CFG.ECONOMY.START_MONEY;
+  G.health = data.health ?? CFG.PLAYER.HEALTH;
+  if (G.time) G.time.dayTime = data.dayTime ?? CFG.WORLD.START_DAY_TIME;
+  if (G.police) G.police.wanted = data.wanted || 0;
+  if (G.missions) {
+    G.missions.done = new Set(data.missionsDone || []);
+    G.missions.current = data.currentMission || 0;
   }
-}
-
-function writeRaw(data) {
-  try {
-    window.localStorage.setItem(cfg.SAVE_KEY, JSON.stringify(data));
-    return true;
-  } catch (e) {
-    return false; // storage full / blocked: game keeps running unsaved
+  if (G.activities) {
+    G.activities.packagesFound = new Set(data.packages || []);
+    G.activities.taxiDone = data.taxiDone || 0;
+    G.activities.racesWon = data.racesWon || 0;
   }
+  if (G.player && data.player) {
+    G.player.pos.x = data.player.x;
+    G.player.pos.z = data.player.z;
+    G.player.heading = data.player.heading || 0;
+  }
+  if (data.stats) G.stats = { ...data.stats };
 }
 
 export function init(G) {
-  function collect() {
-    const p = G.player || {};
-    const pos = (typeof p.x === 'number')
-      ? { x: p.x, z: p.z, heading: p.heading || 0 }
-      : { x: -18, z: 108, heading: Math.PI };
-    return {
-      version: 1,
-      money: (G.story && G.story.money) ?? (G.player && G.player.money) ?? cfg.START_MONEY,
-      health: (G.player && G.player.health) ?? cfg.PLAYER.maxHealth,
-      missionsCompleted: (G.missions && G.missions.completed)
-        ? G.missions.completed.slice() : [],
-      currentMission: (G.missions && typeof G.missions.currentIndex === 'number')
-        ? G.missions.currentIndex : 0,
-      packagesFound: (G.activities && G.activities.packagesFound) || 0,
-      racesWon: (G.activities && G.activities.racesWon) || 0,
-      taxiDone: (G.activities && G.activities.taxiDone) || 0,
-      player: pos,
-      dayTime: G.time ? G.time.dayTime : cfg.START_DAY_TIME,
-      createdAt: Date.now(),
-    };
-  }
+  G.save = save;
+  save.has = hasSave();
+  return save;
+}
 
-  function apply(data) {
-    if (!data) return false;
-    if (G.player) {
-      G.player.x = data.player.x;
-      G.player.z = data.player.z;
-      G.player.heading = data.player.heading;
-      G.player.health = data.health;
-      G.player.money = data.money;
-    }
-    if (G.missions) {
-      G.missions.completed = (data.missionsCompleted || []).slice();
-      G.missions.currentIndex = data.currentMission || 0;
-    }
-    if (G.activities) {
-      G.activities.packagesFound = data.packagesFound || 0;
-      G.activities.racesWon = data.racesWon || 0;
-      G.activities.taxiDone = data.taxiDone || 0;
-    }
-    if (G.time) G.time.dayTime = data.dayTime;
+export function hasSave() {
+  try {
+    return !!window.localStorage.getItem(CFG.SAVE_KEY);
+  } catch (e) {
+    return false;
+  }
+}
+
+export function saveGame(G) {
+  try {
+    const data = collect(G);
+    window.localStorage.setItem(CFG.SAVE_KEY, JSON.stringify(data));
+    save.has = true;
     return true;
-  }
-
-  G.save = {
-    data: readRaw(),
-    defaultSave,
-    save() {
-      const data = collect();
-      const ok = writeRaw(data);
-      G.save.data = data;
-      return ok;
-    },
-    load() {
-      const data = readRaw();
-      G.save.data = data;
-      if (!data) return null;
-      apply(data);
-      return data;
-    },
-    hasSave() {
-      return readRaw() !== null;
-    },
-    clear() {
-      try { window.localStorage.removeItem(cfg.SAVE_KEY); } catch (e) { /* ignore */ }
-      G.save.data = null;
-    },
-    apply,
-  };
-  return G.save;
-}
-
-export function update(G, dt) {
-  // Autosave once a minute while playing (never in menu / screenshots).
-  if (G.state !== 'playing' || !G.save) return;
-  autosaveTimer += dt;
-  if (autosaveTimer >= cfg.AUTOSAVE_SECONDS) {
-    autosaveTimer = 0;
-    G.save.save();
+  } catch (e) {
+    console.warn('[save] could not write save:', e);
+    return false;
   }
 }
 
-export default { init, update };
+export function loadGame(G) {
+  try {
+    const raw = window.localStorage.getItem(CFG.SAVE_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    if (!data || data.version !== 1) return false;
+    apply(G, data);
+    return true;
+  } catch (e) {
+    console.warn('[save] could not load save:', e);
+    return false;
+  }
+}
+
+export function clearSave() {
+  try {
+    window.localStorage.removeItem(CFG.SAVE_KEY);
+    save.has = false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+export default save;

@@ -1,218 +1,180 @@
-// story.js — the words of Meridian Heat: mission briefings and dialogue.
-// All text is original fiction (Port Meridian, Rook, Mara Voss, Dante Kroll).
-// Owns G.story. Dialogue is shown through the HUD banner; missions.js asks
-// for lines by mission id and stage.
+// story.js — dialogue, briefings and ending text for Meridian Heat.
+//
+// All story text lives here, in English. Nothing in this module touches the
+// DOM or THREE; missions.js reads the briefings through G.story at runtime
+// (with short fallbacks when story has not been initialised yet), so the
+// two modules never import each other. Pure data + tiny accessors: safe to
+// import in Node with no browser globals at all.
 
-export const CHARACTERS = {
-  rook: { name: 'Rook', color: '#7ec8ff' },
-  mara: { name: 'Mara Voss', color: '#ffb347' },
-  dante: { name: 'Dante Kroll', color: '#ff6b6b' },
-  dispatch: { name: 'Dispatch', color: '#9dff9d' },
-  kroll: { name: 'Kroll Gunman', color: '#ff6b6b' },
-};
+export const INTRO_LINES = [
+  'PORT MERIDIAN — 2:14 AM',
+  'Rook, a freelance driver with a fast car and faster debts, is back in town.',
+  'Mara Voss runs the jobs. Dante Kroll runs the streets.',
+  'Tonight, Rook takes his first job. The city is watching.',
+];
 
-/** Briefing text per mission id (1-8). Pure data, tested. */
+export const ENDING_LINES = [
+  'Dante Kroll is finished. The tower belongs to no one now.',
+  'Mara looks at the skyline and smiles for the first time in years.',
+  'ROOK — KING OF MERIDIAN.',
+  'Thanks for playing Meridian Heat.',
+];
+
+// One briefing per story mission. `objective` is the one-line HUD text,
+// `lines` are the briefing shown on the mission card.
 export const BRIEFINGS = {
-  1: {
+  'first-wheels': {
     title: 'First Wheels',
-    giver: 'mara',
-    text: 'You need wheels before you can work, Rook. There is a sedan parked near the Harbor garage — take it. Any car will do, but do not get spotted lifting it. Bring it to my garage in Old Town and we will talk business.',
+    reward: 500,
+    objective: 'Steal a car and drive it to Mara\u2019s garage',
+    lines: [
+      'MARA: "Rook. You need wheels before you need anything else."',
+      'MARA: "Take any car on the street. Bring it to my garage in Old Town."',
+      'MARA: "Don\u2019t get caught. Cops notice a stolen car."',
+    ],
   },
-  2: {
+  'courier-run': {
     title: 'Courier Run',
-    giver: 'mara',
-    text: 'Three packages, three drop-offs, one clock. The buyers do not wait, and neither do the Kroll boys. Hit every marker before the timer runs out and the money is yours. Drive like the city owes you.',
+    reward: 800,
+    objective: 'Deliver 3 packages before the timer runs out',
+    lines: [
+      'MARA: "Three packages, three corners of the city. No questions."',
+      'MARA: "You\u2019ve got four minutes. The buyers don\u2019t wait."',
+      'ROOK: "Four minutes? I\u2019ll do it in three."',
+    ],
   },
-  3: {
+  getaway: {
     title: 'Getaway',
-    giver: 'mara',
-    text: 'The Harbor job went loud and the precinct has your plate. Two stars, Rook. Stay out of their hands for sixty seconds — lose them in the alleys, break line of sight, do not get boxed in. Survive and the heat dies down.',
+    reward: 1000,
+    objective: 'Lose a 2-star wanted level — survive 60 seconds',
+    lines: [
+      'MARA: "Kroll\u2019s boys tipped off the cops. You\u2019re hot, Rook."',
+      'MARA: "Two stars. Stay out of sight for a minute and they\u2019ll lose you."',
+      'ROOK: "A minute? I can hide for a minute."',
+    ],
   },
-  4: {
+  'rival-rumble': {
     title: 'Rival Rumble',
-    giver: 'mara',
-    text: 'Dante Kroll thinks the docks are his. His crew is holding Pier 9 tonight. Go down there and make it clear Port Meridian has a new driver in town. They shoot first — so shoot better.',
+    reward: 1500,
+    objective: 'Take down 6 Kroll gang members at the docks',
+    lines: [
+      'MARA: "Kroll\u2019s crew is moving product through the Harbor docks."',
+      'MARA: "Hit them hard. Six of them. Make it loud — I want Kroll to hear it."',
+      'ROOK: "Loud is my favourite volume."',
+    ],
   },
-  5: {
+  'midnight-race': {
     title: 'Midnight Race',
-    giver: 'mara',
-    text: 'Street race, midnight, three laps around the Harbor loop. Kroll entered his best driver to humiliate us. Beat him through every checkpoint and take the purse. The whole city will be watching.',
+    reward: 2000,
+    objective: 'Win the street race — 3 laps, 4 checkpoints',
+    lines: [
+      'MARA: "Midnight race, Beachfront circuit. Winner takes two grand."',
+      'MARA: "Kroll entered his best driver. Beat him, and the streets talk."',
+      'ROOK: "Then let\u2019s give them something to talk about."',
+    ],
   },
-  6: {
+  'the-pickup': {
     title: 'The Pickup',
-    giver: 'mara',
-    text: 'I need a ride to the port, and I need it quiet. Pick me up at the garage. Word is Kroll has a welcoming party waiting — if it goes loud, get me out with three stars on our tail and do not stop for anything.',
+    reward: 2500,
+    objective: 'Drive Mara to the Harbor — survive the ambush',
+    lines: [
+      'MARA: "I need a ride to the Harbor. Kroll knows I\u2019m moving tonight."',
+      'MARA: "If they jump us, you drive. I shoot. Don\u2019t stop for anything."',
+      'ROOK: "Seatbelt on, Mara. This is going to be loud."',
+    ],
   },
-  7: {
+  'harbor-heist': {
     title: 'Harbor Heist',
-    giver: 'mara',
-    text: 'A Kroll courier truck is sitting at the Harbor depot, full of product. Take it, drive it to the warehouse in the Hills, and do it with four stars breathing down your neck. This is the big one, Rook.',
+    reward: 4000,
+    objective: 'Steal the delivery truck, deliver it to the warehouse',
+    lines: [
+      'MARA: "Kroll\u2019s delivery truck is parked at the Harbor depot."',
+      'MARA: "Take it. Bring it to the warehouse in the Hills. Four stars, easy."',
+      'MARA: "Easy? Rook — the whole port police will be on you."',
+      'ROOK: "Then they\u2019d better bring a fast car."',
+    ],
   },
-  8: {
+  'king-of-meridian': {
     title: 'King of Meridian',
-    giver: 'mara',
-    text: 'Dante is done hiding. He wants a race, a chase, and a fight at the Meridian Tower — all in one night. Beat him on the road, lose the cops, then finish it on the tower roof. Win this, and the city is ours.',
-  },
-};
-
-/** Dialogue lines per mission id, keyed by stage. Pure data, tested. */
-export const DIALOGUE = {
-  1: {
-    start: [
-      { who: 'mara', line: 'Rook. You are late, you are broke, and you are on foot. Let us fix the last one first.' },
-      { who: 'rook', line: 'You always know how to make a guy feel welcome, Mara.' },
-      { who: 'mara', line: 'Take the sedan by the Harbor garage. Bring it to my place in Old Town. Try not to scratch it. Actually — scratch it all you want. It is not yours yet.' },
-    ],
-    done: [
-      { who: 'mara', line: 'Not bad. You drive like you mean it. I have work for you, if you want it.' },
-    ],
-  },
-  2: {
-    start: [
-      { who: 'mara', line: 'Three drops. Clock is running. Do not stop to admire the view.' },
-      { who: 'rook', line: 'Three drops, one Rook. Let us go.' },
-    ],
-    done: [
-      { who: 'mara', line: 'All three delivered, on time. The buyers are happy. Happy buyers pay.' },
-    ],
-  },
-  3: {
-    start: [
-      { who: 'dispatch', line: 'All units: suspect vehicle fleeing the Harbor district. Two stars, approach with caution.' },
-      { who: 'rook', line: 'Sixty seconds. I can do sixty seconds standing on my head.' },
-    ],
-    done: [
-      { who: 'mara', line: 'They lost you. Nice driving. The heat will forget — eventually.' },
-    ],
-  },
-  4: {
-    start: [
-      { who: 'dante', line: 'Pier 9 belongs to Kroll. Walk away, driver, before this gets expensive.' },
-      { who: 'rook', line: 'Funny. Mara said the same thing about your ego.' },
-    ],
-    done: [
-      { who: 'mara', line: 'Pier 9 is quiet tonight. Kroll will remember this.' },
-    ],
-  },
-  5: {
-    start: [
-      { who: 'dante', line: 'Midnight race, pretty boy. My driver eats rookies for breakfast.' },
-      { who: 'rook', line: 'Then he is about to starve.' },
-    ],
-    done: [
-      { who: 'mara', line: 'Three laps, first across the line. The city saw it, Rook. The city saw it.' },
-    ],
-  },
-  6: {
-    start: [
-      { who: 'mara', line: 'Pick me up at the garage. And Rook — bring something fast. Tonight will not be quiet.' },
-      { who: 'rook', line: 'When is it ever quiet with you?' },
-    ],
-    pickup: [
-      { who: 'mara', line: 'Drive! Kroll boys on the corner — go, go, go!' },
-    ],
-    done: [
-      { who: 'mara', line: 'We made it. You drive like a ghost, Rook. A very loud ghost.' },
-    ],
-  },
-  7: {
-    start: [
-      { who: 'mara', line: 'The truck is at the Harbor depot. Take it, bring it to the Hills warehouse. Four stars will follow. Smile for the cameras.' },
-      { who: 'rook', line: 'Four stars. You really know how to treat a guy.' },
-    ],
-    done: [
-      { who: 'mara', line: 'The product is ours. Kroll just funded our whole month.' },
-    ],
-  },
-  8: {
-    start: [
-      { who: 'dante', line: 'Meridian Tower. Tonight. Race me, outrun the law, and then we settle it on the roof. No more hiding, Rook.' },
-      { who: 'rook', line: 'You finally grew a spine, Dante. See you at the top.' },
-      { who: 'mara', line: 'Careful, Rook. This is the whole city, one night. Make it count.' },
-    ],
-    raceDone: [
-      { who: 'dante', line: 'Lucky lap. The roof, Rook. Now!' },
-    ],
-    done: [
-      { who: 'mara', line: 'King of Meridian. It has a nice ring to it, does it not?' },
-      { who: 'rook', line: 'Port Meridian is ours now, Mara. All of it.' },
+    reward: 10000,
+    objective: 'Win the race, escape the chase, clear the tower',
+    lines: [
+      'MARA: "This is it, Rook. Kroll himself, at the Meridian Tower."',
+      'MARA: "Race his crew, lose the cops, then go up that tower and end it."',
+      'ROOK: "One city. One king. Let\u2019s finish this."',
     ],
   },
 };
 
-/** Briefing for a mission id, or null. Pure. */
-export function briefingFor(id) {
+// Short barks the world says back: pickups, busts, wins and losses.
+export const BARKS = {
+  steal: ['That\u2019s my car!', 'Hey! That\u2019s mine!', 'Somebody stop him!'],
+  busted: ['On the ground! Now!', 'You\u2019re done, Rook.', 'Hands where I can see them!'],
+  wasted: ['Man down!', 'Get a medic over here!', 'He\u2019s not moving.'],
+  package: ['Package secured.', 'One down.', 'Delivery confirmed.'],
+  taxiPickup: ['Downtown, please.', 'Harbor, and step on it!', 'Old Town, if you don\u2019t mind.'],
+  taxiDone: ['Keep the change.', 'Fastest ride in town!', 'Five stars, driver.'],
+};
+
+export function briefing(id) {
   return BRIEFINGS[id] ?? null;
 }
 
-/** Dialogue lines for a mission id and stage key, or []. Pure. */
-export function linesFor(id, stage) {
-  const m = DIALOGUE[id];
-  if (!m) return [];
-  return m[stage] ?? [];
+export function briefingLines(id) {
+  const b = BRIEFINGS[id];
+  return b ? b.lines.slice() : [];
 }
 
-/** One-line objective summary for the HUD tracker. Pure. */
-export function objectiveSummary(id, stage) {
-  const map = {
-    1: ['Steal a car', 'Drive it to Mara\'s garage'],
-    2: ['Deliver the packages (0/3)', 'Beat the clock'],
-    3: ['Survive the police for 60 seconds', 'Do not get busted'],
-    4: ['Clear Pier 9 of Kroll gunmen', 'Stay alive'],
-    5: ['Win the midnight race (3 laps)', 'Hit every checkpoint'],
-    6: ['Pick up Mara', 'Reach the port — escape the ambush'],
-    7: ['Steal the courier truck', 'Deliver it to the Hills warehouse'],
-    8: ['Beat Dante in the race', 'Lose the cops', 'Face Dante on the tower roof'],
-  };
-  return map[id] ?? ['Complete the mission'];
+export function objectiveText(id) {
+  const b = BRIEFINGS[id];
+  return b ? b.objective : '';
+}
+
+export function missionTitle(id) {
+  const b = BRIEFINGS[id];
+  return b ? b.title : id;
+}
+
+export function missionReward(id) {
+  const b = BRIEFINGS[id];
+  return b ? b.reward : 0;
+}
+
+export function missionIds() {
+  return Object.keys(BRIEFINGS);
+}
+
+export function bark(kind, rng) {
+  const list = BARKS[kind];
+  if (!list || list.length === 0) return '';
+  const pick = rng && typeof rng.int === 'function'
+    ? rng.int(0, list.length - 1)
+    : rng && typeof rng.nextInt === 'function'
+      ? rng.nextInt(0, list.length)
+      : Math.floor(Math.random() * list.length);
+  return list[pick % list.length];
 }
 
 export function init(G) {
   G.story = {
-    /** Show a line of dialogue through the HUD banner. */
-    say(who, line, holdSeconds) {
-      const c = CHARACTERS[who] ?? { name: who, color: '#ffffff' };
-      const text = `${c.name}: ${line}`;
-      try {
-        G.hud?.banner?.(text, holdSeconds ?? 4);
-      } catch (e) { /* best-effort */ }
-      try {
-        G.events?.emit?.('dialogue', { who, line });
-      } catch (e) { /* best-effort */ }
-    },
-
-    /** Play a stage's lines in order, spaced out. Queued on G.story. */
-    playLines(id, stage) {
-      const lines = linesFor(id, stage);
-      G.story._queue = lines.map((l) => ({ ...l }));
-      G.story._lineTimer = 0.1;
-    },
-
-    /** The briefing object for a mission id. */
-    briefing(id) {
-      return briefingFor(id);
-    },
-
-    /** Objective summary lines for the HUD tracker. */
-    objectives(id, stage) {
-      return objectiveSummary(id, stage);
-    },
-
-    _queue: [],
-    _lineTimer: 0,
+    intro: INTRO_LINES.slice(),
+    ending: ENDING_LINES.slice(),
+    briefings: BRIEFINGS,
+    barks: BARKS,
+    briefing,
+    briefingLines,
+    objectiveText,
+    missionTitle,
+    missionReward,
+    missionIds,
+    bark: (kind) => bark(kind, G.rng),
   };
   return G.story;
 }
 
 export function update(G, dt) {
-  const s = G.story;
-  if (!s || G.state !== 'playing') return;
-  if (s._queue.length > 0) {
-    s._lineTimer -= dt;
-    if (s._lineTimer <= 0) {
-      const next = s._queue.shift();
-      s.say(next.who, next.line, 4.5);
-      s._lineTimer = 4.5;
-    }
-  }
+  // Story is data-only: no per-frame work. Kept for the uniform module
+  // contract (main.js calls init/update on every module).
+  void G;
+  void dt;
 }

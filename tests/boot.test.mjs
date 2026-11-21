@@ -1,15 +1,5 @@
-// Boot test: the real world module plus every gameplay module, wired the
-// way main.js wires them, running 600 ticks (10 seconds) with scripted
-// input — walk, steal a car, drive, run a mission, take heat. Nothing may
-// throw, and the world must visibly change.
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { installThreeStub, installDomStub, makeG } from './helpers.mjs';
-
-installThreeStub();
-installDomStub();
-
-import * as world from '../game/src/world.js';
 import * as player from '../game/src/player.js';
 import * as vehicles from '../game/src/vehicles.js';
 import * as traffic from '../game/src/traffic.js';
@@ -17,166 +7,259 @@ import * as peds from '../game/src/peds.js';
 import * as police from '../game/src/police.js';
 import * as missions from '../game/src/missions.js';
 import * as combat from '../game/src/combat.js';
-import * as activities from '../game/src/activities.js';
 import * as hud from '../game/src/hud.js';
+import * as activities from '../game/src/activities.js';
 import * as story from '../game/src/story.js';
+import {
+  makeG, wireMainEffects, installThreeStub, uninstallThreeStub,
+  installDocumentStub, uninstallDocumentStub,
+} from './helpers.mjs';
 
-const MODULES = [player, vehicles, traffic, peds, police, missions, combat, activities, hud, story];
+const MODULES = [player, vehicles, traffic, peds, police, missions, combat, hud, activities, story];
 
-test('boot: 600 ticks with scripted play, no throws', async () => {
-  const G = makeG();
-  G.state = 'playing';
+// The main loop's update order (main.js frame()).
+function tick(G, dt) {
+  for (const mod of MODULES) mod.update(G, dt);
+  G.time.t += dt;
+}
 
-  // Engine first (world builds the real city), then gameplay in loop order.
-  world.init(G);
-  assert.ok(G.world, 'world built');
-  assert.ok(G.world.roads.length > 0, 'roads exist');
-  assert.ok(G.world.buildings.length > 100, 'city has buildings');
-  assert.equal(typeof G.world.collide, 'function');
-  assert.equal(typeof G.world.nearestRoadPoint, 'function');
-  assert.equal(typeof G.world.randomRoadPos, 'function');
-  for (const m of MODULES) m.init(G);
-  assert.ok(G.player.mesh, 'player mesh');
-  assert.ok(G.vehicles.list.length > 0, 'cars exist');
-  assert.equal(G.traffic.cars.length, 14);
-  assert.equal(G.peds.list.length, 24);
-  assert.equal(G.activities.packages.length, 20, 'packages from world spots');
-  assert.equal(G.missions.defs.length, 8);
+function assertFiniteWorld(G) {
+  assert.ok(Number.isFinite(G.player.pos.x) && Number.isFinite(G.player.pos.z), 'player pos NaN');
+  assert.ok(Number.isFinite(G.health) && Number.isFinite(G.money), 'health/money NaN');
+  for (const v of G.vehicles.list) {
+    assert.ok(Number.isFinite(v.pos.x) && Number.isFinite(v.pos.z), 'vehicle pos NaN');
+    assert.ok(Number.isFinite(v.speed), 'vehicle speed NaN');
+  }
+  for (const ped of G.peds.list) {
+    assert.ok(Number.isFinite(ped.pos.x) && Number.isFinite(ped.pos.z), 'ped pos NaN');
+  }
+}
 
-  const held = G.input.held;
-  const tick = (dt = 1 / 60) => {
-    // world.update owns the clock (G.time.t); do not advance it here too.
-    for (const m of MODULES) m.update(G, dt);
-    world.update(G, dt);
-    // Input edge presses are cleared by main.js each frame; mimic that.
-    G.input.pressed.clear();
-  };
+// Move Rook — and the car he is driving, if any — to a point. (While
+// driving, player.update copies the car position every tick, so moving
+// the player alone would be undone at once.)
+function teleportTo(G, x, z) {
+  const pv = G.vehicles ? G.vehicles.playerVehicle : null;
+  if (pv) {
+    pv.pos.x = x;
+    pv.pos.z = z;
+    pv.speed = 0;
+  }
+  G.player.pos.x = x;
+  G.player.pos.z = z;
+}
 
-  // Phase 1 (ticks 0-119): walk forward with W.
-  held.add('KeyW');
-  const z0 = G.player.pos.z;
-  for (let i = 0; i < 120; i++) tick();
-  assert.notEqual(G.player.pos.z, z0, 'player walked');
-  assert.ok(G.player.speed > 0, 'player has speed');
-  held.delete('KeyW');
+describe('full boot (stub THREE + stub DOM)', () => {
+  it('inits all modules in main.js order and runs 600 ticks without throwing', () => {
+    installThreeStub();
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      wireMainEffects(G);
+      for (const mod of MODULES) mod.init(G);
 
-  // Phase 2 (ticks 120-179): step next to a parked car and press E.
-  const parked = G.vehicles.list.find((v) => v.driver === 'none');
-  assert.ok(parked, 'a parked car exists');
-  // Put it on the z=108 road, facing east, so the drive phase has a clear run.
-  parked.pos.x = -100;
-  parked.pos.z = 108;
-  parked.heading = Math.PI / 2;
-  G.player.pos.x = parked.pos.x + 2;
-  G.player.pos.z = parked.pos.z;
-  G.player.x = G.player.pos.x;
-  G.player.z = G.player.pos.z;
-  held.add('KeyE');
-  tick();
-  held.delete('KeyE');
-  assert.equal(G.player.inVehicle, true, 'player entered the car');
-  assert.equal(G.player.vehicle, parked);
+      assert.ok(G.player.pos);
+      assert.ok(G.vehicles.list.length >= 14, 'parked cars spawned');
+      assert.ok(G.peds.list.length > 0, 'peds spawned');
+      assert.equal(G.state, 'playing');
 
-  // Phase 3 (ticks 180-299): drive it.
-  held.add('KeyW');
-  const carX0 = parked.pos.x;
-  const carZ0 = parked.pos.z;
-  for (let i = 0; i < 120; i++) tick();
-  assert.ok(Math.abs(parked.speed) > 5, `car speed=${parked.speed}`);
-  assert.ok(
-    Math.hypot(parked.pos.x - carX0, parked.pos.z - carZ0) > 5,
-    `car moved ${Math.hypot(parked.pos.x - carX0, parked.pos.z - carZ0).toFixed(1)} m`,
-  );
-  held.delete('KeyW');
+      const dt = 1 / 60;
+      // Walk for a while.
+      G.input.keys = { KeyW: true };
+      for (let i = 0; i < 60; i++) tick(G, dt);
+      const walked = Math.hypot(G.player.pos.x + 42, G.player.pos.z + 32);
+      assert.ok(walked > 1, 'player walked');
 
-  // Phase 4: get out, start mission 1, drive the mission car to the garage.
-  held.add('KeyE');
-  tick();
-  held.delete('KeyE');
-  assert.equal(G.player.inVehicle, false, 'player exited the car');
-  const m1 = G.missions.startMission(1);
-  assert.ok(m1, 'mission 1 started');
-  assert.ok(m1.waypoint, 'mission 1 has a waypoint');
-  const missionCar = G.vehicles.list.find((v) => v.id === m1.data.carId);
-  G.player.pos.x = missionCar.pos.x + 2;
-  G.player.pos.z = missionCar.pos.z;
-  G.player.x = G.player.pos.x;
-  G.player.z = G.player.pos.z;
-  tick(); // a frame with E released, so the edge detector re-arms
-  held.add('KeyE');
-  tick();
-  held.delete('KeyE');
-  assert.equal(G.player.vehicle, missionCar, 'player stole the mission car');
-  tick();
-  assert.equal(G.missions.current.stage, 1, 'mission 1 advanced to the drive stage');
-  missionCar.pos.x = 0;
-  missionCar.pos.z = 108;
-  const moneyBefore = G.player.money;
-  tick();
-  assert.equal(G.missions.current, null, 'mission 1 passed');
-  assert.ok(G.missions.completed.includes(1));
-  assert.equal(G.player.money, moneyBefore + 500);
+      // Steal the nearest car with E, then drive.
+      const car = player.nearestVehicle(G, 200) ?? G.vehicles.list[0];
+      G.player.pos.x = car.pos.x + 1;
+      G.player.pos.z = car.pos.z;
+      G.input.keys = {};
+      G.input.justPressed = { KeyE: true };
+      tick(G, dt);
+      G.input.justPressed = {};
+      assert.equal(G.player.onFoot, false);
+      assert.ok(G.vehicles.playerVehicle, 'player has a car');
 
-  // Phase 5: wanted level 2 — cops spawn and chase for the rest of the run.
-  G.police.setWanted(2);
-  assert.equal(G.police.wanted, 2);
-  for (let i = 0; i < 180; i++) tick();
-  assert.ok(G.police.cops.length >= 1, 'cops spawned');
-  assert.equal(G.police.chasing, true);
+      G.input.keys = { KeyW: true };
+      for (let i = 0; i < 180; i++) tick(G, dt);
+      assert.ok(G.stats.distanceDriven > 5, 'car drove');
+      assert.ok(G.traffic.cars.length > 0, 'traffic spawned');
+      assertFiniteWorld(G);
 
-  // Phase 6: combat — get out, spawn an enemy, shoot it.
-  held.add('KeyE');
-  tick();
-  held.delete('KeyE');
-  assert.equal(G.player.inVehicle, false, 'player out of the car to fight');
-  const enemy = G.combat.spawnEnemy({ x: G.player.pos.x + 5, z: G.player.pos.z + 5 });
-  assert.equal(G.combat.enemies.length, 1);
-  G.player.heading = Math.atan2(
-    enemy.pos.x - G.player.pos.x, enemy.pos.z - G.player.pos.z,
-  );
-  G.combat.shoot();
-  assert.ok(enemy.health < enemy.maxHealth, 'shot landed');
+      // Mission 1: already in a car, so drive to the garage.
+      missions.startMission(G, 1);
+      assert.equal(G.missions.current, 1);
+      const g = missions.landmark(G, 'garage');
+      teleportTo(G, g.x, g.z);
+      for (let i = 0; i < 10; i++) tick(G, dt);
+      assert.ok(G.missions.done.has(1), 'mission 1 completed');
+      assert.ok(G.money > 500, 'mission reward paid');
 
-  // Phase 7: a hidden package under the player's feet.
-  const pkg = G.activities.packages.find((p) => !p.found);
-  G.player.pos.x = pkg.x;
-  G.player.pos.z = pkg.z;
-  G.player.x = pkg.x;
-  G.player.z = pkg.z;
-  const foundBefore = G.activities.packagesFound;
-  tick();
-  assert.equal(G.activities.packagesFound, foundBefore + 1);
+      // Wanted: police spawn and chase.
+      police.setWanted(G, 2);
+      for (let i = 0; i < 120; i++) tick(G, dt);
+      assert.ok(G.police.cars.length > 0, 'police pursuit spawned');
+      assertFiniteWorld(G);
 
-  // Phase 8: run the clock out to 600 ticks total.
-  let ticks = 0;
-  // (Count the ticks already run: 120+1+120+1+1+1+1+180+1 = ~426; top up.)
-  while (ticks < 200) { tick(); ticks++; }
-  assert.ok(G.time.t > 9, `clock advanced: ${G.time.t.toFixed(1)}s`);
-  assert.equal(G.state, 'playing', 'game still running');
-  assert.ok(G.player.health > 0, 'player alive');
+      // Combat: stop the car, aim it north, spawn an enemy ahead, shoot.
+      G.input.keys = {};
+      const pv = G.vehicles.playerVehicle;
+      pv.heading = 0;
+      pv.speed = 0;
+      const e = combat.spawnEnemy(G, pv.pos.x, pv.pos.z - 8);
+      G.input.mouseDown = true;
+      for (let i = 0; i < 60; i++) tick(G, dt);
+      G.input.mouseDown = false;
+      assert.ok(e.health < 60, 'enemy took fire');
+      assert.ok(G.combat.ammo < 12, 'ammo spent');
 
-  // HUD stayed in sync the whole time (no throw, values written).
-  const moneyEl = document.getElementById('money');
-  assert.ok(moneyEl.textContent.startsWith('$'), `money HUD: ${moneyEl.textContent}`);
-  const starsEl = document.getElementById('stars');
-  assert.equal(starsEl.textContent, '★★☆☆☆');
+      // Taxi: a passenger nearby, drive to pickup and dropoff.
+      peds.spawnPed(G, G.player.pos.x + 3, G.player.pos.z);
+      G.input.justPressed = { KeyT: true };
+      tick(G, dt);
+      G.input.justPressed = {};
+      assert.equal(G.activities.taxi.active, true);
+      const pickup = G.activities.taxi.pickup;
+      teleportTo(G, pickup.x, pickup.z);
+      for (let i = 0; i < 5; i++) tick(G, dt);
+      assert.equal(G.activities.taxi.stage, 'dropoff');
+      const drop = G.activities.taxi.dropoff;
+      teleportTo(G, drop.x, drop.z);
+      for (let i = 0; i < 5; i++) tick(G, dt);
+      assert.equal(G.activities.taxi.active, false);
+      assert.equal(G.activities.taxiDone, 1);
+
+      // A race: start downtown, run the checkpoints.
+      assert.equal(activities.startRace(G, 'downtown'), true);
+      const race = G.activities.race;
+      for (let lap = 0; lap < 3; lap++) {
+        for (let cp = 0; cp < 4; cp++) {
+          const point = race.cps[race.cp];
+          teleportTo(G, point.x, point.z);
+          tick(G, 0.5);
+        }
+      }
+      assert.equal(G.activities.race.active, false);
+      assert.equal(G.activities.racesWon, 1);
+
+      // Keep ticking to 600 total ticks.
+      const totalTicks = 60 + 1 + 180 + 10 + 120 + 60 + 1 + 5 + 5 + 12;
+      for (let i = totalTicks; i < 600; i++) tick(G, dt);
+      assertFiniteWorld(G);
+      assert.equal(doc.elements.money.textContent, `$${G.money.toLocaleString('en-US')}`);
+      assert.ok(G.scene.added.length > 0, 'meshes added to the scene');
+    } finally {
+      uninstallDocumentStub();
+      uninstallThreeStub();
+    }
+  });
+
+  it('survives a bust and a retry without throwing', () => {
+    installThreeStub();
+    installDocumentStub();
+    try {
+      const G = makeG();
+      wireMainEffects(G);
+      for (const mod of MODULES) mod.init(G);
+      const dt = 1 / 60;
+      police.setWanted(G, 1);
+      const car = police.spawnPursuit(G, G.player.pos, 1)[0];
+      let busted = false;
+      for (let i = 0; i < 600; i++) {
+        // Keep the cop pinned on Rook (it caught him — no escape).
+        car.pos.x = G.player.pos.x + 1;
+        car.pos.z = G.player.pos.z;
+        car.speed = 0;
+        tick(G, dt);
+        if (G.state === 'busted') { busted = true; break; }
+      }
+      assert.ok(busted, 'player got busted');
+      // Retry (mirrors main.js retryAfterEnd).
+      G.health = 100;
+      G.state = 'playing';
+      G.player.onFoot = true;
+      G.player.vehicle = null;
+      for (let i = 0; i < 120; i++) tick(G, dt);
+      assertFiniteWorld(G);
+    } finally {
+      uninstallDocumentStub();
+      uninstallThreeStub();
+    }
+  });
+
+  it('survives being wasted and keeps ticking', () => {
+    installThreeStub();
+    installDocumentStub();
+    try {
+      const G = makeG();
+      wireMainEffects(G);
+      for (const mod of MODULES) mod.init(G);
+      const dt = 1 / 60;
+      combat.applyDamageToPlayer(G, 999, 'test');
+      assert.equal(G.state, 'wasted');
+      for (let i = 0; i < 60; i++) tick(G, dt);
+      assertFiniteWorld(G);
+    } finally {
+      uninstallDocumentStub();
+      uninstallThreeStub();
+    }
+  });
 });
 
-test('boot: world.collide pushes the player out of buildings', () => {
-  const G = makeG();
-  world.init(G);
-  const b = G.world.buildings[0];
-  const pos = { x: (b.minX + b.maxX) / 2, y: 0, z: (b.minZ + b.maxZ) / 2 };
-  G.world.collide(pos, 0.6);
-  const inside = pos.x > b.minX - 0.6 && pos.x < b.maxX + 0.6
-    && pos.z > b.minZ - 0.6 && pos.z < b.maxZ + 0.6;
-  assert.equal(inside, false, 'pushed out of the building AABB');
-});
+describe('logic-only boot (no THREE, no document)', () => {
+  it('inits and runs 600 ticks with no browser globals at all', () => {
+    assert.equal(typeof globalThis.THREE, 'undefined');
+    assert.equal(typeof globalThis.document, 'undefined');
+    const G = makeG();
+    wireMainEffects(G);
+    for (const mod of MODULES) mod.init(G);
+    const dt = 1 / 60;
+    G.input.keys = { KeyW: true };
+    for (let i = 0; i < 600; i++) {
+      tick(G, dt);
+      if (i === 300) {
+        G.input.keys = {};
+        missions.startMission(G, 1);
+      }
+    }
+    assertFiniteWorld(G);
+    assert.ok(G.traffic.cars.length > 0);
+  });
 
-test('boot: world.nearestRoadPoint snaps to a road', () => {
-  const G = makeG();
-  world.init(G);
-  const p = G.world.nearestRoadPoint(10, 10);
-  assert.ok(p);
-  assert.ok(p.dist < 40, `dist=${p.dist}`);
+  it('menu-state ticks are harmless', () => {
+    const G = makeG({ state: 'menu' });
+    for (const mod of MODULES) mod.init(G);
+    for (let i = 0; i < 120; i++) tick(G, 1 / 60);
+    assertFiniteWorld(G);
+  });
+
+  it('shots-style staging works: giveCar + setWanted + spawnPursuit', () => {
+    installThreeStub();
+    installDocumentStub();
+    try {
+      const G = makeG();
+      wireMainEffects(G);
+      for (const mod of MODULES) mod.init(G);
+      // Chase shot: red car, 3 stars, traffic, objective override.
+      const car = G.vehicles.spawn({ x: 0, z: 0, heading: 0, color: 0xc03028, parked: false });
+      G.vehicles.enter(car);
+      assert.equal(G.player.onFoot, false);
+      G.police.setWanted(3);
+      assert.equal(G.police.wanted, 3);
+      const pursuit = G.police.spawnPursuit(G.player.pos, 3);
+      assert.equal(pursuit.length, 3);
+      G.traffic.spawnNear(0, 0, 40);
+      G.peds.spawnNear(0, 0, 25);
+      missions.startMission(G, 1);
+      G.missions.setWaypoint(-134, 120, 'Mara’s Garage');
+      assert.equal(G.missions.active.data.waypoint.x, -134);
+      G.hud.setObjective('Mission 1 — First Wheels: drive to Mara’s Garage');
+      for (let i = 0; i < 120; i++) tick(G, 1 / 60);
+      assertFiniteWorld(G);
+    } finally {
+      uninstallDocumentStub();
+      uninstallThreeStub();
+    }
+  });
 });

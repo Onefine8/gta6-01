@@ -1,59 +1,74 @@
-# Meridian Heat
-
 [![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![rank](https://make.fun/badge/gta6-01/Onefine8/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![reward](https://make.fun/badge/gta6-01/Onefine8/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
-An open-world crime game set in the fictional port city of Port Meridian.
-You are Rook, a freelance driver. Your fixer is Mara Voss; your rival is
-Dante Kroll and the Kroll crew. Steal cars, outrun the police, run jobs
-across Downtown, Harbor, Old Town, Beachfront and the Hills — and take back
-the city, one mission at a time.
+# Meridian Heat
+
+An open-world crime game in the fictional port city of **Port Meridian**,
+built for the make.fun `gta6-01` bounty. You are **Rook**, a freelance
+driver with fast hands and faster debts. **Mara Voss** runs the jobs.
+**Dante Kroll** runs the streets. Take the jobs, take the city.
 
 ## Play
 
 Open `game/index.html` in a desktop browser (or serve `game/` with any
-static server). No network request is made while the game runs; three.js is
-vendored under `game/vendor/`.
+static server). No network is needed while playing: three.js is vendored
+under `game/vendor/`, all audio is synthesized with WebAudio.
 
-- **W A S D** — move / drive, **Shift** — run, **Space** — jump
-- **E** — enter / exit a car (nearby cars can be stolen)
-- **Mouse** — aim, **Click** — shoot (pistol / SMG, keys **1** / **2**)
-- **R** — radio, **Esc** — pause, **M** — mission list
+- **Move:** WASD to walk, Shift to run, Space to jump
+- **Drive:** walk up to any car and press **E** to get in (stealing one
+  attracts the police); **W/S** throttle and brake, **A/D** steer,
+  **Space** handbrake
+- **Fight:** mouse click or **F** to shoot, **1/2** or **Q** to switch
+  weapon, **R** to reload
+- **Jobs:** **Esc** opens the menu — start story missions, drive a taxi
+  (**T**), or race the three street circuits
+- **Pause:** **Esc** · **Save:** from the pause menu
 
-## Features
+## The city
 
-- Procedural city: 8x8 block grid, districts, bridge, harbor, day/night cycle
-- On-foot and driving, arcade car physics with drift
-- Traffic AI and pedestrians that flee danger
-- Wanted system (0–5 stars), police pursuit, bust and cooldown
-- 8 story missions with briefings, waypoints, timers and cash rewards
-- Combat: pistol and SMG, armed Kroll enemies
-- Side activities: taxi fares, 3 street-race circuits, 20 hidden packages
-- HUD with health, cash, wanted stars, speed, minimap and mission tracker
-- Save / continue via localStorage, synthesized WebAudio sound and radio
+Port Meridian is a procedural 8×8-block port city: Downtown, Harbor, Old
+Town, Beachfront and the Hills, with a pier, a bridge, neon at night and a
+full day/night cycle. Traffic follows the road grid, pedestrians stroll
+the sidewalks (and run when shots are fired), and the Meridian PD
+escalates from one to five wanted stars.
 
-## Screenshot presets
+## Story — 8 missions
 
-`game/index.html?shot=chase&seed=7` — police chase
-`game/index.html?shot=walk&seed=7` — walking the city
-`game/index.html?shot=mission&seed=7` — a mission in progress
-`game/index.html?shot=night&seed=7` — the city at night
+1. **First Wheels** — steal a car, deliver it to Mara's garage
+2. **Courier Run** — three packages, four minutes
+3. **Getaway** — lose a 2-star wanted level for 60 seconds
+4. **Rival Rumble** — clear the Kroll gang off the docks
+5. **Midnight Race** — three laps, six checkpoints, beat Kroll's driver
+6. **The Pickup** — drive Mara to the Harbor through an ambush
+7. **Harbor Heist** — steal the shipment truck, lose four stars
+8. **King of Meridian** — race, chase and a tower shootout
 
-## Build the entry
+Side work pays too: taxi fares, three race circuits with best times, and
+20 hidden packages scattered across the city. Progress, money, missions
+and packages are saved to localStorage.
 
+## Screenshots
+
+`?shot=chase&seed=7` — police pursuit · `?shot=walk&seed=7` — on foot
+downtown · `?shot=mission&seed=7` — mission 1 in progress ·
+`?shot=night&seed=7` — the neon tower district at night.
+
+## Develop
+
+```sh
+node --check game/src/*.js   # syntax check every module
+node --test tests/           # unit + 600-tick boot test
 ```
+
+## Hand in
+
+```sh
 mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 ```
 
-This copies `game/` and `screenshots/` to the output directory and writes
-`dossier.json` with the vendored make.fun library.
-
-## Tests
-
-```
-node --test tests/
-```
+`main.ts` copies `game/` and `screenshots/` to the output directory and
+writes `dossier.json` with the vendored make.fun library.
 
 ## License
 

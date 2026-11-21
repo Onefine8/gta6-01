@@ -1,0 +1,10 @@
+{
+  "description": "Meridian Heat \u2014 open-world crime game in Port Meridian (make.fun gta6-01, round 9)",
+  "name": "meridian-heat",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "type": "module",
+  "version": "9.0.0"
+}

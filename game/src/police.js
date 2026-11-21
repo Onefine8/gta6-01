@@ -1,382 +1,237 @@
-// police.js — the wanted system: heat 0..100 maps to 0..5 stars, cops spawn
-// and chase, ramming the player's car; stand still near a cop and you get
-// busted. Heat decays when the player lies low and unseen. Owns G.police.
+// police.js — wanted level, PMPD pursuit, busts and heat decay.
+//
+// Owns G.police. Heat (0–100) is the single number behind the stars:
+// crimes add heat, quiet time bleeds it away. Police cars are real
+// vehicles (model 'police') whose `drive` field this module writes every
+// tick; vehicles.js does the physics. Pure wanted math is exported so the
+// test suite can check the thresholds without a browser.
 
-import * as configModule from './config.js';
-import * as randomModule from './random.js';
+export const HEAT_MAX = 100;
+export const HEAT_DECAY_QUIET = 3.0; // per second, no recent crime
+export const HEAT_DECAY_HOT = 1.2; // per second, still being chased
+export const CRIME_COOLDOWN = 6; // seconds after a crime before decay
+export const BUST_TIME = 3; // seconds pinned by a cop on foot to be busted
+export const BUST_RADIUS = 4.5;
+export const POLICE_SPAWN_RADIUS = 70;
+export const POLICE_DESPAWN_RADIUS = 260;
 
-const CFG = configModule.CONFIG ?? configModule.default ?? {};
-const mulberry32 = randomModule.mulberry32 ?? randomModule.default ?? null;
+// Heat thresholds for each wanted level (stars shown = index).
+export const WANTED_THRESHOLDS = [0, 12, 30, 50, 70, 90];
 
-// ---------------------------------------------------------------- helpers
-
-function cfg(G, key, fallback) {
-  const c = G.cfg ?? CFG;
-  const v = c == null ? undefined : c[key];
-  return v === undefined || v === null ? fallback : v;
-}
-
-function section(G, name, fallback) {
-  const c = G.cfg ?? CFG;
-  const s = c == null ? undefined : c[name];
-  return s === undefined || s === null ? fallback : s;
-}
-
-/** A callable RNG from G.rng (the createRng bundle) or a fresh mulberry32. */
-function rngFn(G) {
-  const r = G.rng;
-  if (typeof r === 'function') return r;
-  if (r && typeof r.next === 'function') return r.next;
-  if (mulberry32) return mulberry32(G.seed ?? 7);
-  return Math.random;
-}
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-function emit(G, name, data) {
-  try {
-    G.events?.emit?.(name, data);
-  } catch (e) { /* best-effort */ }
-}
-
-/** Map my sound names onto the audio module's real play() names. */
-const SOUND_MAP = {
-  hurt: 'crash', wasted: 'missionFail', door: 'doorSlam', steal: 'uiClick',
-  bump: 'crash', checkpoint: 'pickup', delivery: 'pickup', ambush: 'wantedUp',
-  cash: 'pickup', package: 'pickup', 'race-start': 'horn',
-  'race-win': 'missionComplete', 'race-lose': 'missionFail',
-  'mission-start': 'uiClick', 'mission-pass': 'missionComplete',
-  'mission-fail': 'missionFail', siren: 'wantedUp', busted: 'missionFail',
-  kill: 'pickup', 'shot-smg': 'shot', 'shot-enemy': 'shot', reload: 'reload',
-  crash: 'crash', shot: 'shot', engine: null, footstep: 'footstep',
-};
-
-function sfx(G, name) {
-  try {
-    const mapped = Object.prototype.hasOwnProperty.call(SOUND_MAP, name)
-      ? SOUND_MAP[name] : name;
-    if (mapped) G.audio?.play?.(mapped);
-  } catch (e) { /* audio is best-effort */ }
-}
-
-// ---------------------------------------------------------------- pure math (tested)
-
-/** Heat thresholds: heat >= threshold[i] means wanted level i. */
-export const WANTED_THRESHOLDS = [0, 12, 30, 52, 74, 92];
-
-/** Wanted level (0..5) for a heat value 0..100. Pure. */
-export function wantedForHeat(heat) {
-  let level = 0;
-  for (let i = 0; i < WANTED_THRESHOLDS.length; i++) {
-    if (heat >= WANTED_THRESHOLDS[i]) level = i;
+export function wantedFromHeat(heat) {
+  let w = 0;
+  for (let i = 1; i < WANTED_THRESHOLDS.length; i++) {
+    if (heat >= WANTED_THRESHOLDS[i]) w = i;
   }
+  return w;
+}
+
+export function heatForWanted(level) {
+  const l = Math.max(0, Math.min(5, level));
+  return WANTED_THRESHOLDS[l];
+}
+
+export function decayStep(heat, dt, rate) {
+  return Math.max(0, heat - rate * dt);
+}
+
+export function spawnCountForWanted(wanted) {
+  return [0, 1, 2, 3, 4, 6][Math.max(0, Math.min(5, wanted))] ?? 0;
+}
+
+// Steering + throttle to chase a target position.
+export function chaseDrive(car, target) {
+  const dx = target.x - car.pos.x;
+  const dz = target.z - car.pos.z;
+  const want = Math.atan2(dx, -dz);
+  let diff = want - car.heading;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  const steer = Math.max(-1, Math.min(1, diff * 2.4));
+  const dist = Math.hypot(dx, dz);
+  const throttle = dist > 6 ? 1 : 0.4;
+  return { throttle, steer, handbrake: false };
+}
+
+// Bust progress: +dt while a cop is close and Rook is slow on foot,
+// decaying otherwise. Returns the new progress.
+export function bustProgressStep(progress, pinned, dt) {
+  if (pinned) return progress + dt;
+  return Math.max(0, progress - dt * 1.5);
+}
+
+// --- heat API (other modules call these) ---------------------------------
+
+export function addHeat(G, amount, reason) {
+  const pol = G.police;
+  if (!pol) return 0;
+  const before = pol.wanted;
+  pol.heat = Math.min(HEAT_MAX, pol.heat + amount);
+  pol.lastCrimeAt = G.time ? G.time.t : 0;
+  pol.wanted = wantedFromHeat(pol.heat);
+  if (pol.wanted > before) {
+    if (G.events && typeof G.events.emit === 'function') {
+      G.events.emit('wanted', { level: pol.wanted, reason });
+    }
+    if (G.hud && typeof G.hud.flashWanted === 'function') G.hud.flashWanted();
+  }
+  return pol.wanted;
+}
+
+export function setWanted(G, level) {
+  const pol = G.police;
+  if (!pol) return 0;
+  pol.heat = heatForWanted(level);
+  pol.lastCrimeAt = G.time ? G.time.t : 0;
+  pol.wanted = level;
   return level;
 }
 
-/** Heat gained for a crime type. Pure. */
-export function heatForCrime(crime) {
-  switch (crime) {
-    case 'theft': return 14;
-    case 'murder': return 30;
-    case 'shooting': return 10;
-    case 'speeding': return 3;
-    case 'crash': return 4;
-    case 'mission': return 20;
-    default: return 8;
+export function clearWanted(G) {
+  const pol = G.police;
+  if (!pol) return;
+  pol.heat = 0;
+  pol.wanted = 0;
+  pol.bustProgress = 0;
+}
+
+// --- spawning ------------------------------------------------------------
+
+function spawnPoliceCar(G, near) {
+  const spawn = (G.vehicles && typeof G.vehicles.spawn === 'function')
+    ? G.vehicles.spawn
+    : (typeof G.vehiclesSpawn === 'function' ? G.vehiclesSpawn : null);
+  if (typeof spawn !== 'function') return null;
+  const rng = G.rng;
+  const r = () => (rng && typeof rng.next === 'function' ? rng.next() : Math.random());
+  const angle = r() * Math.PI * 2;
+  const dist = POLICE_SPAWN_RADIUS * (0.7 + r() * 0.6);
+  const x = near.x + Math.cos(angle) * dist;
+  const z = near.z + Math.sin(angle) * dist;
+  const car = spawn({ x, z, heading: r() * Math.PI * 2, model: 'police', driver: 'police', owned: true });
+  if (!car) return null;
+  car.ai = { mode: 'chase' };
+  G.police.cars.push(car);
+  if (G.audio && typeof G.audio.play === 'function') G.audio.play('siren');
+  return car;
+}
+
+function despawnPoliceCar(G, car) {
+  const list = G.police.cars;
+  const i = list.indexOf(car);
+  if (i >= 0) list.splice(i, 1);
+  if (G.vehicles && typeof G.vehicles.despawn === 'function') G.vehicles.despawn(car);
+}
+
+// Spawn a pursuit of `stars` cars around a position (shots.js staging).
+export function spawnPursuit(G, pos, stars) {
+  const n = spawnCountForWanted(stars);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const car = spawnPoliceCar(G, pos);
+    if (car) out.push(car);
   }
+  return out;
 }
 
-/** How many cop cars should be on the street for a wanted level. Pure. */
-export function copsForWanted(wanted) {
-  return [0, 1, 2, 3, 4, 6][clamp(wanted, 0, 5)];
-}
-
-/** Heat decay per second while lying low (faster at low wanted). Pure. */
-export function heatDecayRate(wanted, unseenSeconds) {
-  const base = wanted <= 1 ? 6 : wanted <= 2 ? 3.5 : wanted <= 3 ? 2 : 1.2;
-  return unseenSeconds > 8 ? base * 1.6 : base;
-}
-
-/** Star string for the HUD: '★★☆☆☆' style. Pure. */
-export function starsString(wanted) {
-  let s = '';
-  for (let i = 0; i < 5; i++) s += i < wanted ? '★' : '☆';
-  return s;
-}
-
-/** Fine charged on a bust, by wanted level. Pure. */
-export function bustFine(wanted) {
-  return [0, 50, 150, 400, 800, 1500][clamp(wanted, 0, 5)];
-}
-
-// ---------------------------------------------------------------- module
+// --- lifecycle -----------------------------------------------------------
 
 export function init(G) {
-  const rng = rngFn(G);
-  const pcfg = section(G, 'POLICE', {});
+  // Replace the (frozen) module namespace on G with the live police
+  // object: wanted state plus update() and the helpers other modules and
+  // shots.js call (addHeat / setWanted / clearWanted / spawnPursuit).
   G.police = {
     wanted: 0,
     heat: 0,
-    cops: [],
-    bustTimer: 0,
-    bustHold: 0,
-    unseenTimer: 0,
-    lastCrimeAt: -999,
-    chasing: false,
-    _rng: rng,
-    _spawnTimer: 0,
-
-    /** Raise heat for a crime; wanted follows automatically. */
-    addWanted(amount, crime) {
-      const gain = typeof amount === 'number' ? amount : heatForCrime(crime || 'default');
-      const before = G.police.wanted;
-      G.police.heat = clamp(G.police.heat + gain, 0, 100);
-      G.police.wanted = wantedForHeat(G.police.heat);
-      G.police.lastCrimeAt = G.time ? G.time.t : 0;
-      G.police.unseenTimer = 0;
-      if (G.player) G.player.wanted = G.police.wanted;
-      if (G.police.wanted > before) {
-        emit(G, 'wanted-up', { wanted: G.police.wanted, crime: crime || 'unknown' });
-        sfx(G, 'siren');
-        try {
-          G.hud?.flashWanted?.();
-        } catch (e) { /* best-effort */ }
-      }
-      return G.police.wanted;
-    },
-
-    /** Set the wanted level directly (menu restart, screenshot staging). */
-    setWanted(level) {
-      const lv = clamp(Math.round(level ?? 0), 0, 5);
-      G.police.heat = WANTED_THRESHOLDS[lv];
-      G.police.wanted = lv;
-      G.police.lastCrimeAt = G.time ? G.time.t : 0;
-      if (G.player) G.player.wanted = lv;
-      if (lv === 0) G.police.clearWanted();
-      return lv;
-    },
-
-    /** Drop the heat straight to zero (mission end, cheat-free reset). */
-    clearWanted() {
-      G.police.heat = 0;
-      G.police.wanted = 0;
-      G.police.bustTimer = 0;
-      G.police.chasing = false;
-      if (G.player) G.player.wanted = 0;
-      for (const cop of [...G.police.cops]) G.police.removeCop(cop);
-      emit(G, 'wanted-cleared', {});
-    },
-
-    /** Is any cop actively chasing? (audio.update reads this for the siren.) */
-    anyChasing() {
-      return G.police.wanted > 0 && G.police.cops.length > 0;
-    },
-
-    /** Spawn one police car chasing the player. */
-    spawnCop(opts = {}) {
-      const player = G.player;
-      if (!player) return null;
-      const p = player.inVehicle && player.vehicle ? player.vehicle.pos : player.pos;
-      // Spawn on a road 60-90 m away, in a random direction (or where asked).
-      const ang = rng() * Math.PI * 2;
-      const dist = 60 + rng() * 30;
-      const x = opts.x !== undefined ? opts.x : clamp(p.x + Math.sin(ang) * dist, -285, 285);
-      const z = opts.z !== undefined ? opts.z : clamp(p.z + Math.cos(ang) * dist, -285, 285);
-      const v = G.vehicles.spawn({
-        x, z,
-        heading: opts.heading !== undefined ? opts.heading : Math.atan2(p.x - x, p.z - z),
-        kind: 'police',
-        driver: 'police',
-        maxSpeed: cfg(G, 'POLICE_MAX_SPEED', 42),
-        accel: cfg(G, 'POLICE_ACCEL', 19),
-      });
-      const cop = { vehicle: v, ramCooldown: 0, stuck: 0 };
-      v.ai = { throttle: 0, steer: 0 };
-      G.police.cops.push(cop);
-      emit(G, 'cop-spawned', { vehicleId: v.id });
-      return cop;
-    },
-
-    /** Alias used by the screenshot stager: spawn one cop at a spot. */
-    spawn(opts = {}) {
-      return G.police.spawnCop(opts);
-    },
-
-    /** Alias used by the screenshot stager: spawn n pursuing cops. */
-    spawnPursuit(n) {
-      const out = [];
-      for (let i = 0; i < (n ?? 2); i++) {
-        const c = G.police.spawnCop();
-        if (c) out.push(c);
-      }
-      return out;
-    },
-
-    /** Remove a cop car from the world. */
-    removeCop(cop) {
-      const i = G.police.cops.indexOf(cop);
-      if (i >= 0) G.police.cops.splice(i, 1);
-      if (cop.vehicle) G.vehicles.remove(cop.vehicle);
-    },
-
-    /** Bust the player: fine, lose the heat, main.js shows the end screen. */
-    bust() {
-      const fine = Math.min(G.player?.money ?? 0, bustFine(G.police.wanted));
-      if (G.player) {
-        G.player.money -= fine;
-        if (G.player.vehicle) G.player.exitVehicle();
-      }
-      G.police.clearWanted();
-      emit(G, 'busted', { fine });
-      G.state = 'busted';
-      sfx(G, 'busted');
-      if (G.missions?.onPlayerDown) G.missions.onPlayerDown('busted');
-      return fine;
-    },
+    cars: [],
+    bustProgress: 0,
+    lastCrimeAt: -99,
+    spawnTimer: 0,
+    sirenTimer: 0,
+    update,
+    addHeat: (amount, reason) => addHeat(G, amount, reason),
+    setWanted: (level) => setWanted(G, level),
+    clearWanted: () => clearWanted(G),
+    spawnPursuit: (pos, stars) => spawnPursuit(G, pos, stars),
   };
-
-  // Crimes committed elsewhere in the game raise the heat through events.
-  try {
-    G.events?.on?.('crime', (data) => {
-      if (data) G.police.addWanted(undefined, data.type || 'default');
-    });
-  } catch (e) { /* best-effort */ }
-
   return G.police;
 }
 
 export function update(G, dt) {
   const pol = G.police;
   if (!pol || G.state !== 'playing') return;
-  dt = Math.min(dt, 0.05);
-  const player = G.player;
-  if (!player) return;
-  const t = G.time ? G.time.t : 0;
-  const playerVeh = player.inVehicle ? player.vehicle : null;
-  const playerPos = playerVeh ? playerVeh.pos : player.pos;
-  const playerSpeed = playerVeh ? Math.abs(playerVeh.speed) : Math.abs(player.speed ?? 0);
-  const pcfg = section(G, 'POLICE', {});
+  const now = G.time ? G.time.t : 0;
+  const p = G.player ? G.player.pos : { x: 0, z: 0 };
+  const pv = G.vehicles ? G.vehicles.playerVehicle : null;
 
-  // ---- decay: no crime for a while and no cop can see the player ----
-  let seen = false;
-  for (const cop of pol.cops) {
-    const v = cop.vehicle;
-    if (!v) continue;
-    const d = Math.hypot(v.pos.x - playerPos.x, v.pos.z - playerPos.z);
-    if (d < 45) { seen = true; break; }
-  }
-  if (seen) pol.unseenTimer = 0;
-  else pol.unseenTimer += dt;
-  const sinceCrime = t - pol.lastCrimeAt;
-  if (pol.heat > 0 && sinceCrime > (pcfg.decayDelay ?? 12) && pol.wanted < 3) {
-    pol.heat = Math.max(0, pol.heat - heatDecayRate(pol.wanted, pol.unseenTimer) * dt);
-    const w = wantedForHeat(pol.heat);
+  // Heat decay: only once the crime cooldown has passed.
+  if (now - pol.lastCrimeAt > CRIME_COOLDOWN && pol.heat > 0) {
+    const rate = pol.wanted >= 3 ? HEAT_DECAY_HOT : HEAT_DECAY_QUIET;
+    pol.heat = decayStep(pol.heat, dt, rate);
+    const w = wantedFromHeat(pol.heat);
     if (w !== pol.wanted) {
       pol.wanted = w;
-      emit(G, 'wanted-down', { wanted: w });
-    }
-  }
-  // At 3+ stars the heat only decays when fully unseen for a long while.
-  if (pol.heat > 0 && pol.wanted >= 3 && pol.unseenTimer > 20) {
-    pol.heat = Math.max(0, pol.heat - 1.5 * dt);
-    const w = wantedForHeat(pol.heat);
-    if (w !== pol.wanted) {
-      pol.wanted = w;
-      emit(G, 'wanted-down', { wanted: w });
-    }
-  }
-
-  // ---- spawn / despawn cops to match the wanted level ----
-  const want = copsForWanted(pol.wanted);
-  pol._spawnTimer -= dt;
-  if (pol.cops.length < want && pol._spawnTimer <= 0) {
-    pol.spawnCop();
-    pol._spawnTimer = 1.5;
-  }
-  if (pol.cops.length > want) {
-    // Keep the closest ones.
-    pol.cops.sort((a, b) => {
-      const da = Math.hypot(a.vehicle.pos.x - playerPos.x, a.vehicle.pos.z - playerPos.z);
-      const db = Math.hypot(b.vehicle.pos.x - playerPos.x, b.vehicle.pos.z - playerPos.z);
-      return da - db;
-    });
-    while (pol.cops.length > want) pol.removeCop(pol.cops[pol.cops.length - 1]);
-  }
-
-  // Chasing flag: audio.update reads it (or anyChasing()) for the siren.
-  pol.chasing = pol.wanted > 0 && pol.cops.length > 0;
-
-  // ---- chase AI: steer at the player, ram, and bust on foot ----
-  pol.bustHold = 0;
-  for (const cop of [...pol.cops]) {
-    const v = cop.vehicle;
-    if (!v) continue;
-    const dx = playerPos.x - v.pos.x;
-    const dz = playerPos.z - v.pos.z;
-    const d = Math.hypot(dx, dz);
-
-    // Steering: aim slightly ahead of the player.
-    const lead = 0.35;
-    const pHeading = playerVeh ? playerVeh.heading : (player.heading ?? 0);
-    const pSpeed = playerVeh ? playerVeh.speed : (player.speed ?? 0);
-    const tx = playerPos.x + Math.sin(pHeading) * pSpeed * lead;
-    const tz = playerPos.z + Math.cos(pHeading) * pSpeed * lead;
-    let wantHeading = Math.atan2(tx - v.pos.x, tz - v.pos.z);
-    let dh = wantHeading - v.heading;
-    while (dh > Math.PI) dh -= Math.PI * 2;
-    while (dh < -Math.PI) dh += Math.PI * 2;
-    const steer = clamp(dh * 2.4, -1, 1);
-
-    // Speed: chase at an approach speed that shrinks with distance (plus a
-    // share of the player's speed, so a fleeing car stays catchable), and
-    // brake hard when overshooting it — otherwise the cop orbits at 42 m/s
-    // and never closes in.
-    const approach = d < 6 ? d * 0.5 : Math.min(40, Math.max(6, d * 0.55));
-    const wantSpeed = Math.min(42, approach + playerSpeed * 0.6);
-    let throttle;
-    if (d > 120) throttle = 1; // far away: full throttle to catch up
-    else if (v.speed > wantSpeed + 1) throttle = -1; // brake
-    else if (v.speed < wantSpeed - 1) throttle = 0.8;
-    else throttle = 0.3;
-
-    // Stuck: a cop that cannot move for a while respawns near the player.
-    if (Math.abs(v.speed) < 0.5 && d > 10) {
-      cop.stuck += dt;
-      if (cop.stuck > 5) {
-        pol.removeCop(cop);
-        pol.spawnCop();
-        continue;
-      }
-    } else {
-      cop.stuck = 0;
-    }
-
-    v.ai = { throttle, steer };
-    cop.ramCooldown = Math.max(0, cop.ramCooldown - dt);
-
-    // Ram: bump the player's car and hurt it.
-    if (playerVeh && d < 3.6 && cop.ramCooldown <= 0) {
-      cop.ramCooldown = 1.2;
-      playerVeh.speed *= 0.75;
-      playerVeh.health -= 6;
-      sfx(G, 'bump');
-      emit(G, 'cop-ram', { damage: 6 });
-      if (playerVeh.health <= 0) emit(G, 'car-wrecked', { vehicleId: playerVeh.id });
-    }
-
-    // Bust: on foot, slow, and a cop right next to the player.
-    const bustRadius = pcfg.bustRadius ?? 2.2;
-    if (!playerVeh && d < bustRadius && playerSpeed < 1.5) {
-      pol.bustHold = Math.max(pol.bustHold, 1);
-      pol.bustTimer += dt;
-      if (pol.bustTimer > cfg(G, 'BUST_HOLD_TIME', 1.5)) {
-        pol.bustTimer = 0;
-        pol.bust();
-        return;
+      if (G.events && typeof G.events.emit === 'function') {
+        G.events.emit('wanted', { level: w, reason: 'decay' });
       }
     }
   }
-  if (pol.bustHold === 0) pol.bustTimer = 0;
+
+  // Keep the pursuit at strength for the current wanted level.
+  pol.spawnTimer -= dt;
+  const want = spawnCountForWanted(pol.wanted);
+  if (pol.spawnTimer <= 0) {
+    pol.spawnTimer = 1.2;
+    if (pol.cars.length < want) spawnPoliceCar(G, p);
+  }
+
+  // Siren reminder while wanted.
+  if (pol.wanted > 0) {
+    pol.sirenTimer -= dt;
+    if (pol.sirenTimer <= 0) {
+      pol.sirenTimer = 6;
+      if (G.audio && typeof G.audio.play === 'function') G.audio.play('siren');
+    }
+  }
+
+  let pinned = false;
+  for (let i = pol.cars.length - 1; i >= 0; i--) {
+    const car = pol.cars[i];
+    if (!car || car.wrecked) {
+      pol.cars.splice(i, 1);
+      continue;
+    }
+    const d = Math.hypot(car.pos.x - p.x, car.pos.z - p.z);
+    if (pol.wanted === 0 || d > POLICE_DESPAWN_RADIUS) {
+      despawnPoliceCar(G, car);
+      continue;
+    }
+    car.drive = chaseDrive(car, p);
+
+    // Ramming the player's car slows it and hurts it.
+    if (pv && d < 3.2 && Math.abs(car.speed) > 6) {
+      if (G.vehicles && typeof G.vehicles.damageVehicle === 'function') {
+        G.vehicles.damageVehicle(pv, 4 * dt * 10, 'ram');
+      }
+      car.speed *= 0.7;
+    }
+    // On foot and slow with a cop on top of Rook: busted.
+    const bustRadius = (G.cfg && G.cfg.WANTED && G.cfg.WANTED.BUST_RADIUS) || BUST_RADIUS;
+    const playerSlow = !pv || Math.abs(pv.speed) < 1.5;
+    if (!pv && d < bustRadius && playerSlow) pinned = true;
+  }
+
+  const bustTime = (G.cfg && G.cfg.WANTED && G.cfg.WANTED.BUST_TIME) || BUST_TIME;
+  pol.bustProgress = bustProgressStep(pol.bustProgress, pinned, dt);
+  if (pol.bustProgress >= bustTime) {
+    pol.bustProgress = 0;
+    clearWanted(G);
+    // State transitions belong to main.js: it listens for 'busted' and
+    // shows the end screen (and takes the bail). Never set G.state here.
+    if (G.events && typeof G.events.emit === 'function') G.events.emit('busted', {});
+    if (G.audio && typeof G.audio.play === 'function') G.audio.play('busted');
+    if (G.hud && typeof G.hud.showMessage === 'function') {
+      G.hud.showMessage('BUSTED — the PMPD took you in.');
+    }
+  }
 }

@@ -1,163 +1,89 @@
 // Meridian Heat — bootstrap, game loop and state machine.
-// Builds the shared object G, wires every module, runs the fixed update
-// order from the spec, and owns the menu / playing / paused / busted /
-// wasted states. Gameplay modules (Builder B) are loaded dynamically so the
-// engine boots cleanly with or without them; engine modules are static.
-// Only imports config.js / random.js + engine modules + global THREE.
-import { CONFIG } from './config.js';
-import { createRng } from './random.js';
-import * as world from './world.js';
-import * as render from './render.js';
-import * as input from './input.js';
-import * as audio from './audio.js';
-import * as save from './save.js';
-import * as shots from './shots.js';
+// Creates G (the shared state object every module talks through), wires the
+// engine modules (Builder A) and the gameplay modules (Builder B), then runs
+// the fixed update order from the spec:
+//   input -> player -> vehicles -> traffic -> peds -> police -> missions
+//   -> combat -> activities -> world -> render -> hud
+// Gameplay modules are loaded dynamically with safe stubs, so the engine
+// boots and renders even before a gameplay module lands.
 
-const cfg = CONFIG;
+import { CFG } from './config.js';
+import { makeRng } from './random.js';
+import { init as renderInit, update as renderUpdate, draw as renderDraw } from './render.js';
+import { init as worldInit, update as worldUpdate } from './world.js';
+import { init as inputInit, update as inputUpdate, wasPressed } from './input.js';
+import { init as audioInit, update as audioUpdate, unlock as audioUnlock, playConfirm, playBlip, playBusted } from './audio.js';
+import { init as saveInit, saveGame, loadGame, hasSave } from './save.js';
+import { init as shotsInit } from './shots.js';
 
-// Gameplay modules owned by Builder B. Loaded dynamically, in loop order;
-// a missing module is skipped (logged, never fatal) so the engine boots.
+const THREE = globalThis.THREE;
+
+// Gameplay modules (Builder B). Loaded dynamically; a missing module gets a
+// stub so the engine still boots and the menu / world remain viewable.
 const GAMEPLAY_MODULES = [
-  'player',
-  'vehicles',
-  'traffic',
-  'peds',
-  'police',
-  'missions',
-  'combat',
-  'activities',
-  'hud',
-  'story',
+  'player', 'vehicles', 'traffic', 'peds', 'police',
+  'missions', 'combat', 'hud', 'activities', 'story',
 ];
 
-function createEvents() {
-  const listeners = new Map();
-  return {
-    on(event, fn) {
-      if (!listeners.has(event)) listeners.set(event, []);
-      listeners.get(event).push(fn);
-    },
-    off(event, fn) {
-      const list = listeners.get(event);
-      if (!list) return;
-      const i = list.indexOf(fn);
-      if (i >= 0) list.splice(i, 1);
-    },
-    emit(event, payload) {
-      const list = listeners.get(event);
-      if (!list) return;
-      for (const fn of list.slice()) {
-        try { fn(payload); } catch (e) { console.error('[events]', event, e); }
-      }
-    },
+function stubFor(name) {
+  const base = {
+    __stub: true,
+    init() {},
+    update() {},
   };
-}
-
-function parseSeed() {
-  const params = new URLSearchParams(window.location.search);
-  const raw = params.get('seed');
-  if (raw !== null && raw !== '' && Number.isFinite(Number(raw))) return Number(raw);
-  if (raw !== null && raw !== '') return raw;
-  return 20261121; // deterministic default so every fresh boot looks the same
-}
-
-function defaultPlayer() {
-  return {
-    x: -18, z: 108, heading: Math.PI,
-    speed: 0, health: cfg.PLAYER.maxHealth,
-    money: cfg.START_MONEY, wanted: 0,
-    onFoot: true, inVehicle: false, vehicle: null,
-  };
-}
-
-function $(id) {
-  return document.getElementById(id);
-}
-
-function showOnly(id) {
-  for (const el of ['menu', 'pause-menu', 'end-screen']) {
-    const node = $(el);
-    if (node) node.classList.toggle('hidden', el !== id);
+  if (name === 'player') {
+    base.pos = { x: 0, y: 0, z: 0 };
+    base.heading = 0;
+    base.speed = 0;
+    base.onFoot = true;
+    base.vehicle = null;
+    base.health = CFG.PLAYER.HEALTH;
   }
-  const hud = $('hud');
-  if (hud) hud.classList.toggle('hidden', id === 'menu');
+  if (name === 'vehicles') base.getActive = () => null;
+  if (name === 'police') base.wanted = 0;
+  if (name === 'missions') {
+    base.done = new Set();
+    base.current = 0;
+    base.active = null;
+  }
+  if (name === 'activities') {
+    base.packagesFound = new Set();
+    base.taxiDone = 0;
+    base.racesWon = 0;
+  }
+  if (name === 'combat') base.weapon = 'pistol';
+  if (name === 'hud') base.showMessage = () => {};
+  return base;
 }
 
-// Minimal HUD sync used only until the hud module (Builder B) loads.
-// It touches the same element ids from the spec, so the HUD is never blank.
-function fallbackHud(G) {
-  const p = G.player;
-  if (!p) return;
-  const bar = $('health-bar');
-  if (bar) bar.style.width = `${Math.max(0, Math.min(100, p.health))}%`;
-  const num = $('health-num');
-  if (num) num.textContent = String(Math.round(p.health));
-  const money = $('money');
-  if (money) money.textContent = `$${Math.floor(p.money || 0).toLocaleString('en-US')}`;
-  const stars = $('stars');
-  if (stars) {
-    const wanted = (G.police && typeof G.police.wanted === 'number')
-      ? G.police.wanted : (p.wanted || 0);
-    stars.textContent = '★'.repeat(wanted) + '☆'.repeat(cfg.POLICE.maxWanted - wanted);
-  }
-  const speed = $('speed');
-  if (speed) {
-    const kmh = Math.round(Math.abs(p.inVehicle && p.vehicle ? (p.vehicle.speed || 0) : (p.speed || 0)) * 3.6);
-    speed.textContent = `${kmh} km/h`;
-  }
-}
-
-async function loadGameplayModules(G) {
+async function loadGameplay(G) {
   const loaded = {};
   for (const name of GAMEPLAY_MODULES) {
     try {
       const mod = await import(`./${name}.js`);
-      if (mod && typeof mod.init === 'function') mod.init(G);
-      loaded[name] = mod;
+      const api = mod.default && typeof mod.default === 'object' ? mod.default : mod;
+      G[name] = api;
+      loaded[name] = true;
+      if (typeof api.init === 'function') api.init(G);
     } catch (e) {
-      // Missing Builder B file: log once and keep going. The engine,
-      // the city and the camera all work without gameplay modules.
-      console.warn(`[main] gameplay module '${name}' not loaded:`, e.message);
-      loaded[name] = null;
+      console.warn(`[main] gameplay module "${name}" not available, using stub:`, e.message);
+      G[name] = stubFor(name);
+      loaded[name] = false;
     }
   }
   return loaded;
 }
 
-function updateGameplay(G, modules, dt) {
-  // Spec update order: input -> player -> vehicles -> traffic -> peds ->
-  // police -> missions -> combat -> activities -> world -> render -> hud.
-  // input.update clears edge presses, so it runs first.
-  input.update(G, dt);
-  const order = ['player', 'vehicles', 'traffic', 'peds', 'police', 'missions', 'combat', 'activities'];
-  for (const name of order) {
-    const mod = modules[name];
-    if (mod && typeof mod.update === 'function') {
-      try { mod.update(G, dt); } catch (e) { console.error(`[main] ${name}.update`, e); }
-    }
-  }
-  world.update(G, dt);
-  render.update(G, dt);
-  const hudMod = modules.hud;
-  if (hudMod && typeof hudMod.update === 'function') {
-    try { hudMod.update(G, dt); } catch (e) { console.error('[main] hud.update', e); }
-  } else {
-    fallbackHud(G);
-  }
-  audio.update(G, dt);
-  save.update(G, dt);
-  shots.update(G, dt);
-}
-
-async function boot() {
-  const seed = parseSeed();
-  const rng = createRng(seed);
-
-  // ---- Shared game object G ---------------------------------------------
+// --- G: the shared state object ---------------------------------------------
+function createG() {
+  const params = new URLSearchParams(window.location.search);
+  const seedParam = params.get('seed');
+  const seed = seedParam !== null ? Number(seedParam) || CFG.DEFAULT_SEED : CFG.DEFAULT_SEED;
+  const listeners = new Map();
   const G = {
-    cfg,
-    rng,
-    seed: rng.seed,
+    cfg: CFG,
+    seed,
+    rng: makeRng(seed),
     scene: null,
     camera: null,
     renderer: null,
@@ -165,7 +91,7 @@ async function boot() {
     audio: null,
     save: null,
     world: null,
-    player: defaultPlayer(),
+    player: null,
     vehicles: null,
     traffic: null,
     peds: null,
@@ -175,220 +101,338 @@ async function boot() {
     hud: null,
     activities: null,
     story: null,
-    state: 'menu', // 'menu' | 'playing' | 'paused' | 'busted' | 'wasted'
-    time: { t: 0, dayTime: cfg.START_DAY_TIME },
-    events: createEvents(),
+    state: 'menu', // menu | playing | paused | busted | wasted
+    time: { t: 0, dayTime: CFG.WORLD.START_DAY_TIME },
+    money: CFG.ECONOMY.START_MONEY,
+    health: CFG.PLAYER.HEALTH,
+    stats: { playSeconds: 0, carsStolen: 0, distanceDriven: 0 },
     shotMode: false,
-    shot: null,
-    pausedFrom: null,
-  };
-  window.__MERIDIAN__ = G;
-
-  // ---- Engine modules (static) ------------------------------------------
-  render.init(G);
-  world.init(G);
-  input.init(G);
-  audio.init(G);
-  save.init(G);
-
-  // Restore a save if one exists (player position/money/missions).
-  const saved = G.save.load();
-  if (saved) {
-    G.player.money = saved.money;
-    G.player.health = saved.health;
-  }
-
-  // ---- Gameplay modules (dynamic, Builder B) ----------------------------
-  const modules = await loadGameplayModules(G);
-  G.modules = modules;
-
-  // ---- Screenshot staging (after gameplay modules, so it can use them) ---
-  shots.init(G);
-
-  // ---- State machine -----------------------------------------------------
-  function setState(next, payload) {
-    const prev = G.state;
-    G.state = next;
-    G.events.emit('state', { from: prev, to: next, payload });
-    if (next === 'playing') {
-      showOnly(null);
-      if (G.render) G.render.setCameraMode('follow');
-    } else if (next === 'menu') {
-      showOnly('menu');
-      if (G.render) G.render.setCameraMode('orbit');
-    } else if (next === 'paused') {
-      showOnly('pause-menu');
-    } else if (next === 'busted' || next === 'wasted') {
-      const title = $('end-title');
-      if (title) title.textContent = next === 'busted' ? 'BUSTED!' : 'WASTED';
-      const sub = $('end-subtitle');
-      if (sub) {
-        sub.textContent = next === 'busted'
-          ? 'The Meridian PD caught up with Rook.'
-          : 'Rook went down in Port Meridian.';
-      }
-      showOnly('end-screen');
-      if (G.audio) G.audio.play('missionFail');
-    }
-  }
-  G.setState = setState;
-
-  function startGame(fresh) {
-    if (fresh) {
-      const p = defaultPlayer();
-      G.player.x = p.x; G.player.z = p.z; G.player.heading = p.heading;
-      G.player.health = cfg.PLAYER.maxHealth;
-      G.player.money = cfg.START_MONEY;
-      G.player.inVehicle = false;
-      G.player.vehicle = null;
-      if (G.missions && typeof G.missions.reset === 'function') G.missions.reset();
-      if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(0);
-      G.time.dayTime = cfg.START_DAY_TIME;
-    }
-    if (G.audio) G.audio.uiClick();
-    setState('playing');
-  }
-  G.startGame = startGame;
-
-  G.events.on('busted', () => setState('busted'));
-  G.events.on('wasted', () => setState('wasted'));
-  G.events.on('mission-complete', () => {
-    if (G.audio) G.audio.play('missionComplete');
-  });
-  G.events.on('mission-failed', () => {
-    if (G.audio) G.audio.play('missionFail');
-  });
-
-  // ---- Menu wiring --------------------------------------------------------
-  const startBtn = $('start-button');
-  if (startBtn) startBtn.addEventListener('click', () => startGame(true));
-  const continueBtn = $('continue-button');
-  if (continueBtn) {
-    continueBtn.classList.toggle('hidden', !G.save.hasSave());
-    continueBtn.addEventListener('click', () => startGame(false));
-  }
-  const resumeBtn = $('resume-button');
-  if (resumeBtn) resumeBtn.addEventListener('click', () => setState('playing'));
-  const restartBtn = $('restart-button');
-  if (restartBtn) restartBtn.addEventListener('click', () => startGame(true));
-  const quitBtn = $('quit-button');
-  if (quitBtn) quitBtn.addEventListener('click', () => setState('menu'));
-  const retryBtn = $('retry-button');
-  if (retryBtn) {
-    retryBtn.addEventListener('click', () => {
-      G.player.health = cfg.PLAYER.maxHealth;
-      if (G.police && typeof G.police.setWanted === 'function') G.police.setWanted(0);
-      const s = G.world.spawns.garage;
-      G.player.x = s.x; G.player.z = s.z; G.player.heading = s.heading;
-      setState('playing');
-    });
-  }
-  const endMenuBtn = $('end-menu-button');
-  if (endMenuBtn) endMenuBtn.addEventListener('click', () => setState('menu'));
-  const muteBtn = $('mute-button');
-  if (muteBtn) {
-    muteBtn.addEventListener('click', () => {
-      const m = !G.audio.isMuted();
-      G.audio.setMuted(m);
-      muteBtn.textContent = m ? '🔇 Sound: Off' : '🔊 Sound: On';
-    });
-  }
-
-  // ---- Main loop ----------------------------------------------------------
-  let last = performance.now();
-  let pausedByHidden = false;
-  // FPS guard: if the machine struggles, drop render resolution instead of
-  // stuttering. Steps down 2 -> 1.5 -> 1.25 -> 1, at most once per 5 s.
-  let fpsEma = 60;
-  let fpsCheckTimer = 0;
-  const pixelSteps = [2, 1.5, 1.25, 1];
-  let pixelStep = 0;
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && G.state === 'playing') {
-      pausedByHidden = true;
-      setState('paused');
-    } else if (!document.hidden && pausedByHidden) {
-      pausedByHidden = false;
-    }
-  });
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    let dt = (now - last) / 1000;
-    last = now;
-    if (!Number.isFinite(dt) || dt < 0) dt = 0;
-    dt = Math.min(dt, 0.05); // clamp tab-switch spikes
-
-    // FPS guard: track a smoothed frame rate and step the pixel ratio down
-    // when the game cannot hold ~28 fps.
-    if (dt > 0) fpsEma = fpsEma * 0.95 + (1 / dt) * 0.05;
-    fpsCheckTimer += dt;
-    if (fpsCheckTimer >= 5) {
-      fpsCheckTimer = 0;
-      if (fpsEma < 28 && pixelStep < pixelSteps.length - 1 && G.renderer) {
-        pixelStep += 1;
-        G.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, pixelSteps[pixelStep]));
-        console.info(`[main] fps ${fpsEma.toFixed(0)} — pixel ratio -> ${pixelSteps[pixelStep]}`);
-      }
-    }
-
-    // Pause toggle (Esc / P) — edge-triggered, checked before updates.
-    if (G.input && G.input.wasPressed(cfg.KEYS.pause)) {
-      if (G.state === 'playing') setState('paused');
-      else if (G.state === 'paused') setState('playing');
-    }
-    if (G.input && G.input.wasPressed('KeyP')) {
-      if (G.state === 'playing') setState('paused');
-      else if (G.state === 'paused') setState('playing');
-    }
-    // Enter starts the game from the menu.
-    if (G.state === 'menu' && G.input && G.input.wasPressed('Enter')) startGame(!G.save.hasSave());
-    // Radio toggle while playing.
-    if (G.state === 'playing' && G.input && G.input.wasPressed(cfg.KEYS.radio)) {
-      if (G.audio) {
-        const on = !G.audio.isRadioOn();
-        G.audio.setRadio(on);
-        if (on && G.hud && typeof G.hud.showMessage === 'function') {
-          G.hud.showMessage(`Radio: ${G.audio.currentStation()}`);
+    events: {
+      on(type, fn) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      emit(type, data) {
+        const fns = listeners.get(type) || [];
+        for (const fn of fns) {
+          try { fn(data); } catch (e) { console.error('[event]', type, e); }
         }
-      }
-    }
-
-    if (G.state === 'playing') {
-      updateGameplay(G, modules, dt);
-    } else if (G.state === 'menu') {
-      // Menu: keep the world alive behind the title (water, clock, orbit).
-      input.update(G, dt);
-      world.update(G, dt);
-      render.update(G, dt);
-    } else if (G.state === 'paused') {
-      // Frozen frame: render once so the pause menu sits over the scene.
-      input.update(G, dt);
-      render.update(G, 0);
-    } else {
-      // busted / wasted: frozen scene behind the end screen.
-      input.update(G, dt);
-      render.update(G, 0);
-    }
-  }
-
-  // If a screenshot preset staged the scene, the game is already playing.
-  if (!G.shotMode) setState('menu');
-  else showOnly(null);
-
-  requestAnimationFrame(frame);
-  G.events.emit('booted', { seed: rng.seed, modules: Object.keys(modules).filter((k) => modules[k]) });
+      },
+    },
+  };
   return G;
 }
 
+// --- DOM helpers --------------------------------------------------------------
+function el(id) { return document.getElementById(id); }
+
+function show(id, on) {
+  const n = el(id);
+  if (n) n.classList.toggle('hidden', !on);
+}
+
+function setText(id, text) {
+  const n = el(id);
+  if (n) n.textContent = text;
+}
+
+// --- Fallback HUD (used only while hud.js is still a stub) ----------------------
+function updateHudFallback(G) {
+  setText('money', `$${Math.floor(G.money).toLocaleString('en-US')}`);
+  setText('health-num', `${Math.max(0, Math.ceil(G.health))}`);
+  const bar = el('health-bar');
+  if (bar) bar.style.width = `${Math.max(0, Math.min(100, G.health))}%`;
+  const stars = el('stars');
+  if (stars) {
+    const w = (G.police && G.police.wanted) || 0;
+    stars.textContent = '★'.repeat(w) + '☆'.repeat(5 - w);
+    stars.classList.toggle('hot', w >= 3);
+  }
+  const speedEl = el('speed');
+  if (speedEl) {
+    let kmh = 0;
+    if (G.player && G.player.vehicle && G.vehicles && G.vehicles.getActive) {
+      const v = G.vehicles.getActive();
+      if (v) kmh = Math.abs(v.speed || 0) * 3.6;
+    } else if (G.player) {
+      kmh = Math.abs(G.player.speed || 0) * 3.6;
+    }
+    speedEl.textContent = `${Math.round(kmh)} km/h`;
+  }
+}
+
+// --- State transitions ----------------------------------------------------------
+function startGame(G, fresh) {
+  audioUnlock();
+  playConfirm();
+  if (fresh) {
+    G.money = CFG.ECONOMY.START_MONEY;
+    G.health = CFG.PLAYER.HEALTH;
+    G.time.dayTime = CFG.WORLD.START_DAY_TIME;
+    if (G.missions) {
+      G.missions.done = new Set();
+      G.missions.current = 0;
+    }
+    if (G.player && G.world && G.world.landmarks) {
+      G.player.pos.x = G.world.landmarks.spawn.x;
+      G.player.pos.z = G.world.landmarks.spawn.z;
+      G.player.heading = Math.PI;
+    }
+  } else {
+    loadGame(G);
+    if (G.player && G.player.pos) {
+      // Player position was restored by loadGame; make sure we are on foot.
+      G.player.vehicle = null;
+      G.player.onFoot = true;
+    }
+  }
+  G.state = 'playing';
+  show('menu', false);
+  show('pause-menu', false);
+  show('end-screen', false);
+  show('hud', true);
+  G.events.emit('game-start', { fresh });
+}
+
+function pauseGame(G) {
+  if (G.state !== 'playing') return;
+  G.state = 'paused';
+  show('pause-menu', true);
+  playBlip();
+}
+
+function resumeGame(G) {
+  if (G.state !== 'paused') return;
+  G.state = 'playing';
+  show('pause-menu', false);
+  playBlip();
+}
+
+function quitToMenu(G) {
+  saveGame(G);
+  G.state = 'menu';
+  show('pause-menu', false);
+  show('end-screen', false);
+  show('hud', false);
+  show('menu', true);
+  if (G.police) G.police.wanted = 0;
+}
+
+function endGame(G, kind) {
+  // kind: 'busted' | 'wasted'
+  if (G.state !== 'playing') return;
+  G.state = kind;
+  playBusted();
+  const title = el('end-title');
+  const sub = el('end-sub');
+  if (title) title.textContent = kind === 'busted' ? 'BUSTED' : 'WASTED';
+  if (sub) {
+    sub.textContent = kind === 'busted'
+      ? 'The Meridian PD caught up with you. Bail is $200.'
+      : 'Rook is down. Mara is already lining up a replacement driver.';
+  }
+  // Penalty: lose the bail / hospital fee, respawn at the plaza.
+  G.money = Math.max(0, G.money - 200);
+  if (G.police) G.police.wanted = 0;
+  show('end-screen', true);
+  G.events.emit('game-end', { kind });
+}
+
+function retryAfterEnd(G) {
+  G.health = CFG.PLAYER.HEALTH;
+  if (G.player && G.world && G.world.landmarks) {
+    G.player.pos.x = G.world.landmarks.spawn.x;
+    G.player.pos.z = G.world.landmarks.spawn.z;
+    G.player.pos.y = 0;
+    G.player.heading = Math.PI;
+    G.player.vehicle = null;
+    G.player.onFoot = true;
+  }
+  if (G.vehicles && G.vehicles.clearActive) G.vehicles.clearActive();
+  show('end-screen', false);
+  G.state = 'playing';
+  playConfirm();
+}
+
+// --- Menu wiring ------------------------------------------------------------------
+function wireMenus(G, loaded) {
+  const startBtn = el('btn-start');
+  if (startBtn) {
+    startBtn.addEventListener('click', () => startGame(G, true));
+  }
+  const contBtn = el('btn-continue');
+  if (contBtn) {
+    if (hasSave()) {
+      contBtn.classList.remove('hidden');
+      contBtn.addEventListener('click', () => startGame(G, false));
+    }
+  }
+  const howBtn = el('btn-howto');
+  const howPanel = el('howto');
+  if (howBtn && howPanel) {
+    howBtn.addEventListener('click', () => {
+      howPanel.classList.toggle('hidden');
+      playBlip();
+    });
+  }
+  const resumeBtn = el('btn-resume');
+  if (resumeBtn) resumeBtn.addEventListener('click', () => resumeGame(G));
+  const saveBtn = el('btn-save');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      const ok = saveGame(G);
+      setText('save-note', ok ? 'Progress saved.' : 'Save failed.');
+      playConfirm();
+    });
+  }
+  const restartBtn = el('btn-restart');
+  if (restartBtn) restartBtn.addEventListener('click', () => startGame(G, true));
+  const quitBtn = el('btn-quit');
+  if (quitBtn) quitBtn.addEventListener('click', () => quitToMenu(G));
+  const retryBtn = el('btn-retry');
+  if (retryBtn) retryBtn.addEventListener('click', () => retryAfterEnd(G));
+  const menuBtn = el('btn-end-menu');
+  if (menuBtn) menuBtn.addEventListener('click', () => quitToMenu(G));
+  // Mute toggle (M key is the mission menu; use the button instead).
+  const muteBtn = el('btn-mute');
+  if (muteBtn) {
+    muteBtn.addEventListener('click', () => {
+      if (G.audio) {
+        const m = !G.audio.muted;
+        if (G.audio.setMuted) G.audio.setMuted(m);
+        else G.audio.muted = m;
+        muteBtn.textContent = m ? '🔇 Sound: Off' : '🔊 Sound: On';
+      }
+    });
+  }
+  void loaded;
+}
+
+// --- Main loop -----------------------------------------------------------------------
+let lastTime = 0;
+let autosaveTimer = 0;
+
+function callUpdate(mod, G, dt) {
+  if (mod && typeof mod.update === 'function') mod.update(G, dt);
+}
+
+function frame(G, now) {
+  requestAnimationFrame((t) => frame(G, t));
+  const dt = Math.min(0.05, Math.max(0.0001, (now - lastTime) / 1000 || 0.016));
+  lastTime = now;
+  G.time.t += dt;
+
+  // Pause toggle.
+  if (wasPressed(CFG.KEYS.PAUSE)) {
+    if (G.state === 'playing') pauseGame(G);
+    else if (G.state === 'paused') resumeGame(G);
+  }
+
+  // 1. Input (promotes presses for this frame).
+  inputUpdate(G, dt);
+
+  if (G.state === 'playing') {
+    G.stats.playSeconds += dt;
+    // 2-9. Gameplay, in spec order.
+    callUpdate(G.player, G, dt);
+    callUpdate(G.vehicles, G, dt);
+    callUpdate(G.traffic, G, dt);
+    callUpdate(G.peds, G, dt);
+    callUpdate(G.police, G, dt);
+    callUpdate(G.missions, G, dt);
+    callUpdate(G.combat, G, dt);
+    callUpdate(G.activities, G, dt);
+    // 10. World (water, neon, clouds, sun/moon).
+    worldUpdate(G, dt);
+    // Autosave once a minute while playing.
+    autosaveTimer += dt;
+    if (autosaveTimer > 60) {
+      autosaveTimer = 0;
+      saveGame(G);
+    }
+  } else if (G.state === 'menu') {
+    // Menu backdrop: the city still breathes behind the title screen.
+    worldUpdate(G, dt);
+  }
+
+  // 11. Render (camera + lights + draw).
+  renderUpdate(G, dt);
+  renderDraw(G);
+
+  // 12. HUD last, so it reads the freshest state.
+  if (G.hud && !G.hud.__stub) callUpdate(G.hud, G, dt);
+  else updateHudFallback(G);
+
+  // Audio follows the world every frame (engine pitch, sirens, radio).
+  audioUpdate(G, dt);
+}
+
+// --- Boot -------------------------------------------------------------------------------
+async function boot() {
+  const G = createG();
+  window.__G = G; // debug handle (also handy for the finisher's checks)
+
+  renderInit(G);
+  worldInit(G);
+  inputInit(G);
+  audioInit(G);
+  saveInit(G);
+
+  // Player spawn (before gameplay modules init, so they see a sane pos).
+  G.player = stubFor('player');
+  if (G.world && G.world.landmarks) {
+    G.player.pos.x = G.world.landmarks.spawn.x;
+    G.player.pos.z = G.world.landmarks.spawn.z;
+  }
+
+  const loaded = await loadGameplay(G);
+
+  // Game events.
+  G.events.on('mission-complete', (data) => {
+    if (data && data.reward) G.money += data.reward;
+    saveGame(G);
+  });
+  G.events.on('busted', () => endGame(G, 'busted'));
+  G.events.on('wasted', () => endGame(G, 'wasted'));
+  G.events.on('player-died', () => endGame(G, 'wasted'));
+
+  wireMenus(G, loaded);
+
+  // Screenshot staging (?shot=chase|walk|mission|night&seed=N).
+  shotsInit(G);
+
+  // Global error surface: show it in the banner instead of failing silently.
+  window.addEventListener('error', (e) => {
+    const m = el('message');
+    if (m) {
+      m.textContent = `Error: ${e.message}`;
+      m.classList.remove('hidden');
+    }
+    console.error(e.error || e.message);
+  });
+
+  // Start in menu (or straight into a staged shot).
+  if (G.shotMode) {
+    show('menu', false);
+    show('hud', true);
+    G.state = 'playing';
+  } else {
+    show('hud', false);
+    show('menu', true);
+  }
+
+  lastTime = performance.now();
+  requestAnimationFrame((t) => frame(G, t));
+  console.log('[main] Meridian Heat booted, seed', G.seed, 'modules:', loaded);
+}
+
 boot().catch((e) => {
-  console.error('[main] boot failed', e);
-  const msg = $('message');
-  if (msg) {
-    msg.textContent = 'Failed to start Meridian Heat. Please reload the page.';
-    msg.classList.remove('hidden');
+  console.error('[main] boot failed:', e);
+  const m = document.getElementById('message');
+  if (m) {
+    m.textContent = `Boot failed: ${e.message}`;
+    m.classList.remove('hidden');
   }
 });
 
-export default { boot };
+export default boot;

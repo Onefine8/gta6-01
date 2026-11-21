@@ -1,187 +1,189 @@
-// Traffic: road following on the world module's full grid lines.
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  closestOnSegment, steerToward, headingFor, laneOffset, nextIntersection,
-  getRoads, roadLines, randomRoadPos, init, update,
-} from '../game/src/traffic.js';
-import { init as initVehicles, update as vehiclesUpdate } from '../game/src/vehicles.js';
-import { init as initPlayer } from '../game/src/player.js';
-import { installThreeStub, makeG } from './helpers.mjs';
+import * as traffic from '../game/src/traffic.js';
+import * as vehicles from '../game/src/vehicles.js';
+import * as player from '../game/src/player.js';
+import { makeG, makeRng } from './helpers.mjs';
 
-installThreeStub();
+const RAW_ROADS = [
+  { x1: -288, z1: -144, x2: 288, z2: -144, axis: 'x' },
+  { x1: -288, z1: 0, x2: 288, z2: 0, axis: 'x' },
+  { x1: -288, z1: 144, x2: 288, z2: 144, axis: 'x' },
+  { x1: -144, z1: -288, x2: -144, z2: 288, axis: 'z' },
+  { x1: 0, z1: -288, x2: 0, z2: 288, axis: 'z' },
+  { x1: 144, z1: -288, x2: 144, z2: 288, axis: 'z' },
+];
 
-test('traffic: closestOnSegment finds the projection', () => {
-  const c = closestOnSegment({ x: 5, z: 5 }, { x: 0, z: 0 }, { x: 10, z: 0 });
-  assert.equal(c.x, 5);
-  assert.equal(c.z, 0);
-  assert.equal(c.t, 0.5);
+describe('normalizeRoads', () => {
+  it('splits full grid lines into intersection segments', () => {
+    const segs = traffic.normalizeRoads(RAW_ROADS);
+    // 3 x-roads x 4 segments + 3 z-roads x 4 segments = 24
+    assert.equal(segs.length, 24);
+    for (const s of segs) {
+      assert.ok(s.bx - s.ax === 144 || s.bz - s.az === 144, JSON.stringify(s));
+    }
+  });
+  it('passes {ax,az,bx,bz} segments through unchanged', () => {
+    const inSegs = [{ ax: 0, az: 0, bx: 10, bz: 0 }];
+    const out = traffic.normalizeRoads(inSegs);
+    assert.deepEqual(out, inSegs);
+    assert.notEqual(out, inSegs);
+  });
+  it('returns [] for no roads', () => {
+    assert.deepEqual(traffic.normalizeRoads([]), []);
+    assert.deepEqual(traffic.normalizeRoads(null), []);
+  });
+  it('segments chain end to end (no gaps)', () => {
+    const segs = traffic.normalizeRoads(RAW_ROADS);
+    const xRoad = segs.filter((s) => s.az === 0 && s.bz === 0).sort((a, b) => a.ax - b.ax);
+    assert.equal(xRoad.length, 4);
+    for (let i = 1; i < xRoad.length; i++) {
+      assert.equal(xRoad[i].ax, xRoad[i - 1].bx);
+    }
+  });
 });
 
-test('traffic: closestOnSegment clamps to the ends', () => {
-  const c = closestOnSegment({ x: 20, z: 0 }, { x: 0, z: 0 }, { x: 10, z: 0 });
-  assert.equal(c.x, 10);
-  assert.equal(c.t, 1);
+describe('segment helpers', () => {
+  it('segmentPoint interpolates', () => {
+    const p = traffic.segmentPoint({ ax: 0, az: 0, bx: 10, bz: 0 }, 0.5);
+    assert.deepEqual(p, { x: 5, z: 0 });
+  });
+  it('segmentLength measures', () => {
+    assert.equal(traffic.segmentLength({ ax: 0, az: 0, bx: 3, bz: 4 }), 5);
+  });
+  it('segmentHeading points along the road', () => {
+    assert.ok(Math.abs(traffic.segmentHeading({ ax: 0, az: 0, bx: 10, bz: 0 }) - Math.PI / 2) < 1e-9);
+    assert.ok(Math.abs(traffic.segmentHeading({ ax: 0, az: 0, bx: 0, bz: -10 }) - 0) < 1e-9);
+  });
+  it('wrapAngle folds into [-PI, PI]', () => {
+    assert.ok(Math.abs(traffic.wrapAngle(Math.PI * 3) - -Math.PI) < 1e-9
+      || Math.abs(traffic.wrapAngle(Math.PI * 3) - Math.PI) < 1e-9);
+    assert.equal(traffic.wrapAngle(0), 0);
+    assert.ok(traffic.wrapAngle(-Math.PI * 2.5) > -Math.PI - 1e-9);
+  });
+  it('nearestSegment finds the closest road and its t', () => {
+    const segs = traffic.normalizeRoads(RAW_ROADS);
+    const n = traffic.nearestSegment(segs, 5, 2);
+    assert.ok(n.index >= 0);
+    assert.ok(n.dist < 3);
+    assert.ok(n.t >= 0 && n.t <= 1);
+  });
+  it('pickNextSegment continues from the end of a segment', () => {
+    const segs = traffic.normalizeRoads(RAW_ROADS);
+    // First x-road segment at z=-144 runs -288..-144; its end meets the
+    // z-road at x=-144.
+    const first = segs.findIndex((s) => s.az === -144 && s.ax === -288);
+    assert.ok(first >= 0);
+    const next = traffic.pickNextSegment(segs, first, makeRng(3));
+    assert.notEqual(next, -1);
+    const cur = segs[first];
+    const nxt = segs[next];
+    assert.ok(Math.hypot(nxt.ax - cur.bx, nxt.az - cur.bz) < 1.5);
+  });
+  it('pickNextSegment returns -1 with no roads', () => {
+    assert.equal(traffic.pickNextSegment([], 0, makeRng(1)), -1);
+  });
 });
 
-test('traffic: steerToward turns toward the target', () => {
-  // Facing +z (heading 0), target to the right (+x): steer positive.
-  const s = steerToward({ x: 0, z: 0 }, 0, { x: 10, z: 10 });
-  assert.ok(s > 0.5, `steer=${s}`);
-  // Target straight ahead: no steer.
-  assert.ok(Math.abs(steerToward({ x: 0, z: 0 }, 0, { x: 0, z: 10 })) < 0.01);
-  // Target behind: full lock.
-  assert.ok(Math.abs(steerToward({ x: 0, z: 0 }, 0, { x: 0, z: -10 })) > 0.9);
+describe('followDrive', () => {
+  it('steers toward the segment heading', () => {
+    const car = { heading: 0, speed: 5, pos: { x: 0, z: 0 } };
+    const seg = { ax: 0, az: 0, bx: 10, bz: 0 }; // heading PI/2
+    const d = traffic.followDrive(car, seg, 9);
+    assert.ok(d.steer > 0);
+    assert.ok(d.throttle > 0);
+  });
+  it('brakes when over the target speed', () => {
+    const car = { heading: Math.PI / 2, speed: 20, pos: { x: 0, z: 0 } };
+    const seg = { ax: 0, az: 0, bx: 10, bz: 0 };
+    const d = traffic.followDrive(car, seg, 9);
+    assert.ok(d.throttle < 0);
+  });
+  it('holds a straight course with no steering', () => {
+    const car = { heading: Math.PI / 2, speed: 9, pos: { x: 0, z: 0 } };
+    const seg = { ax: 0, az: 0, bx: 10, bz: 0 };
+    const d = traffic.followDrive(car, seg, 9);
+    assert.ok(Math.abs(d.steer) < 0.01);
+  });
 });
 
-test('traffic: headingFor maps axis+direction to radians', () => {
-  assert.equal(headingFor('z', 1), 0);
-  assert.equal(headingFor('z', -1), Math.PI);
-  assert.equal(headingFor('x', 1), Math.PI / 2);
-  assert.equal(headingFor('x', -1), -Math.PI / 2);
-});
-
-test('traffic: laneOffset is 3 m to the right of the heading', () => {
-  const o = laneOffset(0);
-  assert.ok(Math.abs(o.x - 3) < 0.001);
-  assert.ok(Math.abs(o.z) < 0.001);
-  const o2 = laneOffset(Math.PI / 2);
-  assert.ok(Math.abs(o2.x) < 0.001);
-  assert.ok(Math.abs(o2.z + 3) < 0.001);
-});
-
-test('traffic: nextIntersection returns the next grid line ahead', () => {
-  const lines = [-288, -216, -144, -72, 0, 72, 144, 216, 288];
-  assert.equal(nextIntersection(0, 1, lines), 72);
-  assert.equal(nextIntersection(0, -1, lines), -72);
-  assert.equal(nextIntersection(288, 1, lines), null);
-  assert.equal(nextIntersection(-288, -1, lines), null);
-  assert.equal(nextIntersection(71, 1, lines), 72);
-});
-
-test('traffic: getRoads falls back to a grid when the world has none', () => {
-  const G = makeG();
-  const roads = getRoads(G);
-  assert.ok(roads.length >= 36, `roads=${roads.length}`);
-  assert.ok(roads.every((r) => r.ax !== undefined && r.bz !== undefined));
-});
-
-test('traffic: roadLines reduces world-style roads to centrelines', () => {
-  const G = makeG();
-  G.world = {
-    roads: [
-      { ax: -288, az: 0, bx: 288, bz: 0, dir: 'x' },
-      { ax: 0, az: -288, bx: 0, bz: 288, dir: 'z' },
-    ],
-  };
-  const { lines, coords } = roadLines(G);
-  assert.equal(lines.length, 2);
-  assert.deepEqual(coords, [0]);
-});
-
-test('traffic: roadLines on the fallback grid gives 9 lines per axis', () => {
-  const G = makeG();
-  const { lines, coords } = roadLines(G);
-  assert.equal(lines.length, 18);
-  assert.equal(coords.length, 9);
-  assert.equal(coords[0], -288);
-  assert.equal(coords[8], 288);
-});
-
-test('traffic: randomRoadPos lands on a road centreline (+lane)', () => {
-  const G = makeG();
-  const rng = () => 0.5;
-  const p = randomRoadPos(G, rng);
-  const onLine = [-288, -216, -144, -72, 0, 72, 144, 216, 288]
-    .some((c) => Math.abs(p.x - c) <= 3.01 || Math.abs(p.z - c) <= 3.01);
-  assert.ok(onLine, JSON.stringify(p));
-});
-
-test('traffic: init spawns the configured car count', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const tr = init(G);
-  assert.equal(tr.cars.length, 14);
-  for (const c of tr.cars) {
-    assert.ok(c.vehicle, 'car has a vehicle');
-    assert.ok(['x', 'z'].includes(c.axis));
-    assert.ok(c.dir === 1 || c.dir === -1);
+describe('traffic update', () => {
+  function bootedG() {
+    const G = makeG();
+    vehicles.init(G);
+    player.init(G);
+    traffic.init(G);
+    return G;
   }
-});
 
-test('traffic: update moves cars along their lane', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const tr = init(G);
-  const car = tr.cars[0];
-  // Stand next to the car so the respawn logic leaves it alone.
-  G.player.pos.x = car.vehicle.pos.x;
-  G.player.pos.z = car.vehicle.pos.z;
-  G.player.x = G.player.pos.x;
-  G.player.z = G.player.pos.z;
-  const before = { x: car.vehicle.pos.x, z: car.vehicle.pos.z };
-  for (let i = 0; i < 120; i++) {
-    update(G, 1 / 60);
-    vehiclesUpdate(G, 1 / 60);
-  }
-  assert.ok(tr.cars.includes(car), 'car was not respawned away');
-  const moved = Math.hypot(
-    car.vehicle.pos.x - before.x, car.vehicle.pos.z - before.z,
-  );
-  assert.ok(moved > 2, `moved=${moved.toFixed(1)} m in 2 s`);
-  assert.ok(car.vehicle.ai, 'ai field is written every tick');
-  assert.equal(typeof car.vehicle.ai.throttle, 'number');
-  assert.equal(typeof car.vehicle.ai.steer, 'number');
-});
-
-test('traffic: cars stop for a pedestrian standing in front', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const tr = init(G);
-  const car = tr.cars[0];
-  // Put the player on foot right in front of the car, on its lane.
-  const v = car.vehicle;
-  G.player.pos.x = v.pos.x + Math.sin(v.heading) * 6;
-  G.player.pos.z = v.pos.z + Math.cos(v.heading) * 6;
-  G.player.x = G.player.pos.x;
-  G.player.z = G.player.pos.z;
-  v.speed = 8;
-  update(G, 1 / 60);
-  assert.ok(v.ai.throttle <= 0, `throttle=${v.ai.throttle} (should brake)`);
-});
-
-test('traffic: spawned cars stay inside the city clamp', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const tr = init(G);
-  for (const car of tr.cars) {
-    assert.ok(Math.abs(car.vehicle.pos.x) <= 288, `x=${car.vehicle.pos.x}`);
-    assert.ok(Math.abs(car.vehicle.pos.z) <= 288, `z=${car.vehicle.pos.z}`);
-  }
-});
-
-test('traffic: a car far from the player respawns near the player', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  const tr = init(G);
-  const car = tr.cars[0];
-  // Stand 300 m away from the car so the respawn logic must move it.
-  G.player.pos.x = car.vehicle.pos.x + 300;
-  G.player.pos.z = car.vehicle.pos.z;
-  G.player.x = G.player.pos.x;
-  G.player.z = G.player.pos.z;
-  update(G, 1 / 60);
-  vehiclesUpdate(G, 1 / 60);
-  assert.equal(tr.cars.length, 14);
-  for (const c of tr.cars) {
-    const d = Math.hypot(
-      c.vehicle.pos.x - G.player.pos.x, c.vehicle.pos.z - G.player.pos.z,
-    );
-    assert.ok(d < 260, `car ${d.toFixed(0)} m from the player`);
-  }
+  it('spawns cars up to the target near the player', () => {
+    const G = bootedG();
+    for (let i = 0; i < 40; i++) {
+      traffic.update(G, 0.5);
+      vehicles.update(G, 0.5);
+      G.time.t += 0.5;
+    }
+    assert.ok(G.traffic.cars.length > 0);
+    assert.ok(G.traffic.cars.length <= G.traffic.target);
+    for (const car of G.traffic.cars) {
+      assert.ok(Math.hypot(car.pos.x - G.player.pos.x, car.pos.z - G.player.pos.z) < 260);
+    }
+  });
+  it('traffic cars advance along their segments', () => {
+    const G = bootedG();
+    traffic.update(G, 0.5);
+    const car = G.traffic.cars[0];
+    assert.ok(car);
+    const x0 = car.pos.x;
+    const z0 = car.pos.z;
+    for (let i = 0; i < 20; i++) {
+      traffic.update(G, 0.1);
+      vehicles.update(G, 0.1);
+      G.time.t += 0.1;
+    }
+    assert.ok(Math.hypot(car.pos.x - x0, car.pos.z - z0) > 2);
+  });
+  it('despawns cars far from the player', () => {
+    const G = bootedG();
+    traffic.update(G, 0.5);
+    assert.ok(G.traffic.cars.length > 0);
+    const car = G.traffic.cars[0];
+    car.pos.x = G.player.pos.x + 500;
+    car.pos.z = G.player.pos.z + 500;
+    traffic.update(G, 0.5);
+    assert.ok(!G.traffic.cars.includes(car));
+    assert.ok(!G.vehicles.list.includes(car));
+  });
+  it('brakes behind a slow player car', () => {
+    const G = bootedG();
+    const pv = G.vehicles.list[0];
+    G.vehicles.playerVehicle = pv;
+    pv.speed = 0;
+    // Put a traffic car right behind the player car, same heading.
+    const car = G.vehicles.spawn({
+      x: pv.pos.x, z: pv.pos.z + 8, heading: 0, model: 'sedan', driver: 'ai', owned: true,
+    });
+    car.ai = { seg: 0, t: 0.5, speed: 9, stuck: 0 };
+    car.speed = 9;
+    G.traffic.cars.push(car);
+    // Force its segment to run north (-z) toward the player car.
+    G.traffic.segments = [{ ax: pv.pos.x, az: pv.pos.z + 40, bx: pv.pos.x, bz: pv.pos.z - 40 }];
+    car.ai.seg = 0;
+    traffic.update(G, 0.1);
+    assert.ok(car.drive.throttle < 0, `expected braking, got ${car.drive.throttle}`);
+  });
+  it('spawnNear adds a car near a point (shots.js API)', () => {
+    const G = bootedG();
+    const before = G.traffic.cars.length;
+    const car = G.traffic.spawnNear(0, 0, 40);
+    assert.ok(car);
+    assert.equal(G.traffic.cars.length, before + 1);
+    assert.ok(Math.hypot(car.pos.x, car.pos.z) < 200);
+  });
+  it('does not run when the game is not playing', () => {
+    const G = bootedG();
+    G.state = 'menu';
+    traffic.update(G, 1);
+    assert.equal(G.traffic.cars.length, 0);
+  });
 });

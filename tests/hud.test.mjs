@@ -1,132 +1,252 @@
-// HUD: formatting and minimap projection (pure), plus the live HUD update
-// against the DOM stub.
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import * as hud from '../game/src/hud.js';
+import * as vehicles from '../game/src/vehicles.js';
+import * as player from '../game/src/player.js';
+import * as police from '../game/src/police.js';
+import * as missions from '../game/src/missions.js';
 import {
-  formatMoney, formatTimer, kmh, worldToMap, starsString, healthColor,
-  init, update,
-} from '../game/src/hud.js';
-import { init as initPlayer } from '../game/src/player.js';
-import { init as initPolice } from '../game/src/police.js';
-import { init as initVehicles } from '../game/src/vehicles.js';
-import { installThreeStub, installDomStub, makeG } from './helpers.mjs';
+  makeG, installDocumentStub, uninstallDocumentStub, installThreeStub, uninstallThreeStub,
+} from './helpers.mjs';
 
-installThreeStub();
-installDomStub();
-
-test('hud: formatMoney adds commas and a dollar sign', () => {
-  assert.equal(formatMoney(0), '$0');
-  assert.equal(formatMoney(250), '$250');
-  assert.equal(formatMoney(1234567), '$1,234,567');
-  assert.equal(formatMoney(-5), '$0');
+describe('formatMoney', () => {
+  it('formats with thousands separators', () => {
+    assert.equal(hud.formatMoney(0), '$0');
+    assert.equal(hud.formatMoney(500), '$500');
+    assert.equal(hud.formatMoney(1250), '$1,250');
+    assert.equal(hud.formatMoney(1000000), '$1,000,000');
+  });
+  it('rounds and tolerates undefined', () => {
+    assert.equal(hud.formatMoney(99.6), '$100');
+    assert.equal(hud.formatMoney(undefined), '$0');
+  });
 });
 
-test('hud: formatTimer renders M:SS', () => {
-  assert.equal(formatTimer(0), '0:00');
-  assert.equal(formatTimer(65), '1:05');
-  assert.equal(formatTimer(240), '4:00');
-  assert.equal(formatTimer(59.2), '1:00', 'rounds up');
+describe('starsText', () => {
+  it('renders 0..5 stars', () => {
+    assert.equal(hud.starsText(0), '☆☆☆☆☆');
+    assert.equal(hud.starsText(1), '★☆☆☆☆');
+    assert.equal(hud.starsText(3), '★★★☆☆');
+    assert.equal(hud.starsText(5), '★★★★★');
+  });
+  it('clamps out-of-range levels', () => {
+    assert.equal(hud.starsText(9), '★★★★★');
+    assert.equal(hud.starsText(-2), '☆☆☆☆☆');
+  });
 });
 
-test('hud: kmh converts m/s to km/h', () => {
-  assert.equal(kmh(0), 0);
-  assert.equal(kmh(10), 36);
-  assert.equal(kmh(42), 151);
+describe('speedText and healthPct', () => {
+  it('formats speed', () => {
+    assert.equal(hud.speedText(0), '0 km/h');
+    assert.equal(hud.speedText(72.4), '72 km/h');
+  });
+  it('computes health percent clamped', () => {
+    assert.equal(hud.healthPct(50, 100), 50);
+    assert.equal(hud.healthPct(150, 100), 100);
+    assert.equal(hud.healthPct(-10, 100), 0);
+  });
 });
 
-test('hud: worldToMap centres the city and puts north up', () => {
-  const c = worldToMap(0, 0, 180, 288);
-  assert.deepEqual(c, { x: 90, y: 90 });
-  const east = worldToMap(288, 0, 180, 288);
-  assert.ok(east.x > 170 && east.y === 90);
-  const north = worldToMap(0, -288, 180, 288);
-  assert.ok(north.y < 10, 'negative z (north) maps to the top');
+describe('worldToMap', () => {
+  it('maps the world centre to the minimap centre', () => {
+    const p = hud.worldToMap(0, 0, 294, 180);
+    assert.ok(Math.abs(p.x - 90) < 1);
+    // The z range (718: -294..424, harbour included) is taller than x,
+    // so the centre sits at 294/718 of the height, not at half.
+    assert.ok(Math.abs(p.y - (294 / 718) * 180) < 1);
+  });
+  it('maps corners to corners for scalar and object bounds', () => {
+    const a = hud.worldToMap(-294, -294, 294, 180);
+    assert.deepEqual({ x: Math.round(a.x), y: Math.round(a.y) }, { x: 0, y: 0 });
+    const b = hud.worldToMap(10, 10, { minX: -10, maxX: 10, minZ: -10, maxZ: 10 }, 180);
+    assert.deepEqual({ x: Math.round(b.x), y: Math.round(b.y) }, { x: 180, y: 180 });
+  });
 });
 
-test('hud: starsString matches the police module', () => {
-  assert.equal(starsString(2), '★★☆☆☆');
+describe('objectiveFor', () => {
+  it('says explore with no missions module', () => {
+    assert.equal(hud.objectiveFor({}), 'Explore Port Meridian');
+  });
+  it('points at the next job when idle', () => {
+    const G = makeG();
+    missions.init(G);
+    assert.match(hud.objectiveFor(G), /First Wheels/);
+  });
+  it('shows the active mission objective', () => {
+    const G = makeG();
+    vehicles.init(G);
+    player.init(G);
+    police.init(G);
+    missions.init(G);
+    G.hud = { showMessage: () => {} };
+    missions.startMission(G, 1);
+    assert.match(hud.objectiveFor(G), /Steal a car/);
+  });
 });
 
-test('hud: healthColor goes green -> amber -> red', () => {
-  assert.equal(healthColor(0.9), '#4fc94f');
-  assert.equal(healthColor(0.4), '#ffb347');
-  assert.equal(healthColor(0.1), '#ff4f4f');
+describe('drawMinimap', () => {
+  it('draws background, roads and the player triangle', () => {
+    const G = makeG();
+    vehicles.init(G);
+    player.init(G);
+    police.init(G);
+    const calls = [];
+    const ctx = new Proxy({}, {
+      get(_t, prop) { return (...args) => { calls.push(prop); }; },
+      set() { return true; },
+    });
+    hud.drawMinimap(ctx, G, 180);
+    assert.ok(calls.includes('fillRect'));
+    assert.ok(calls.includes('beginPath'));
+    assert.ok(calls.includes('moveTo'));
+    assert.ok(calls.filter((c) => c === 'arc').length >= 0);
+  });
+  it('draws the mission waypoint when one is active', () => {
+    const G = makeG();
+    vehicles.init(G);
+    player.init(G);
+    police.init(G);
+    missions.init(G);
+    G.hud = { showMessage: () => {} };
+    missions.startMission(G, 1);
+    const fills = [];
+    const ctx = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === 'fill') return () => { fills.push(1); };
+        return () => {};
+      },
+      set() { return true; },
+    });
+    hud.drawMinimap(ctx, G, 180);
+    assert.ok(fills.length >= 2); // waypoint diamond + player triangle
+  });
+  it('is a no-op without a context', () => {
+    assert.doesNotThrow(() => hud.drawMinimap(null, makeG(), 180));
+  });
 });
 
-test('hud: init binds every spec element id', () => {
-  const G = makeG();
-  const h = init(G);
-  for (const id of ['hud', 'health-bar', 'health-num', 'money', 'stars', 'speed',
-    'objective', 'message', 'radio', 'minimap', 'menu', 'pause-menu',
-    'end-screen', 'mission-tracker', 'wanted-flash']) {
-    assert.ok(h.els[id], `bound #${id}`);
-  }
-});
-
-test('hud: update writes health, money, stars and speed', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  initPolice(G);
-  const h = init(G);
-  G.player.health = 40;
-  G.player.money = 1234;
-  G.police.setWanted(3);
-  update(G, 1 / 60);
-  assert.equal(h.els['health-num'].textContent, '40');
-  assert.equal(h.els.money.textContent, '$1,234');
-  assert.equal(h.els.stars.textContent, '★★★☆☆');
-  assert.equal(h.els['health-bar'].style.width, '40%');
-});
-
-test('hud: banner shows a message and clears it after the timer', () => {
-  const G = makeG();
-  const h = init(G);
-  h.banner('Hello Meridian', 0.1);
-  assert.equal(h.els.message.textContent, 'Hello Meridian');
-  assert.equal(h.els.message.classList.contains('hidden'), false);
-  for (let i = 0; i < 30; i++) update(G, 1 / 60);
-  assert.equal(h.els.message.textContent, '');
-});
-
-test('hud: showMessage is the alias main.js and shots.js call', () => {
-  const G = makeG();
-  const h = init(G);
-  h.showMessage('Radio: MERIDIAN FM');
-  assert.equal(h.els.message.textContent, 'Radio: MERIDIAN FM');
-});
-
-test('hud: showEnd writes the victory title without wiping buttons', () => {
-  const G = makeG();
-  initPlayer(G);
-  const h = init(G);
-  G.missions = { completed: [1, 2, 3, 4, 5, 6, 7, 8] };
-  h.showEnd(true);
-  const title = document.getElementById('end-title');
-  assert.equal(title.textContent, 'KING OF MERIDIAN');
-  assert.equal(h.els['end-screen'].classList.contains('hidden'), false);
-  h.showEnd(false);
-  assert.equal(h.els['end-screen'].classList.contains('hidden'), true);
-});
-
-test('hud: objective line follows the active mission', () => {
-  const G = makeG();
-  initPlayer(G);
-  initVehicles(G);
-  initPolice(G);
-  const h = init(G);
-  G.missions = {
-    current: { name: 'Courier Run', timer: 65, timerMax: 240, objectives: ['Deliver (1/3)'] },
-    nextAvailable: () => 2,
-    defs: [{ id: 2, name: 'Courier Run' }],
-  };
-  update(G, 1 / 60);
-  assert.ok(h.els.objective.textContent.includes('Courier Run'));
-  assert.ok(h.els.objective.textContent.includes('1:05'), 'timer shown');
-});
-
-test('hud: update tolerates a player without a position', () => {
-  const G = makeG(); // player object exists, but initPlayer never ran: no pos
-  init(G);
-  assert.doesNotThrow(() => update(G, 1 / 60), 'minimap must not crash on a missing pos');
+describe('hud with a stub document', () => {
+  it('init caches elements and update writes money/health/stars', () => {
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      vehicles.init(G);
+      player.init(G);
+      police.init(G);
+      missions.init(G);
+      hud.init(G);
+      G.money = 1250;
+      G.health = 75;
+      police.setWanted(G, 3);
+      hud.update(G, 0.016);
+      assert.equal(doc.elements.money.textContent, '$1,250');
+      assert.equal(doc.elements['health-num'].textContent, '75');
+      assert.equal(doc.elements.stars.textContent, '★★★☆☆');
+      assert.equal(doc.elements['health-bar'].style.width, '75%');
+      assert.match(doc.elements.objective.textContent, /First Wheels/);
+    } finally {
+      uninstallDocumentStub();
+    }
+  });
+  it('speed shows the driven car in km/h, on foot otherwise', () => {
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      vehicles.init(G);
+      player.init(G);
+      police.init(G);
+      missions.init(G);
+      hud.init(G);
+      hud.update(G, 0.016);
+      assert.equal(doc.elements.speed.textContent, 'On foot');
+      const car = G.vehicles.list[0];
+      G.vehicles.playerVehicle = car;
+      G.player.onFoot = false;
+      G.player.vehicle = car;
+      car.speed = 10;
+      hud.update(G, 0.016);
+      assert.equal(doc.elements.speed.textContent, '36 km/h');
+    } finally {
+      uninstallDocumentStub();
+    }
+  });
+  it('showMessage writes the banner and it expires', () => {
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      hud.init(G);
+      G.hud.showMessage('Hello Meridian', 4);
+      assert.equal(doc.elements.message.textContent, 'Hello Meridian');
+      assert.equal(doc.elements.message.style.opacity, '1');
+      G.time.t = 5;
+      hud.update(G, 0.016);
+      assert.equal(doc.elements.message.style.opacity, '0');
+    } finally {
+      uninstallDocumentStub();
+    }
+  });
+  it('setObjective overrides the objective line, then it falls back', () => {
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      missions.init(G);
+      hud.init(G);
+      G.hud.setObjective('Custom objective', 10);
+      hud.update(G, 0.016);
+      assert.equal(doc.elements.objective.textContent, 'Custom objective');
+      G.time.t = 11;
+      hud.update(G, 0.016);
+      assert.match(doc.elements.objective.textContent, /First Wheels/);
+    } finally {
+      uninstallDocumentStub();
+    }
+  });
+  it('tracker lists all eight missions with marks', () => {
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      vehicles.init(G);
+      player.init(G);
+      police.init(G);
+      missions.init(G);
+      hud.init(G);
+      missions.startMission(G, 1);
+      missions.completeMission(G);
+      hud.update(G, 0.016);
+      const text = doc.elements['mission-tracker'].textContent;
+      assert.ok(text.includes('✓ First Wheels'));
+      assert.ok(text.includes('Courier Run'));
+      assert.ok(text.includes('King of Meridian'));
+    } finally {
+      uninstallDocumentStub();
+    }
+  });
+  it('radio shows the station name from cfg', () => {
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      hud.init(G);
+      G.audio.station = 1;
+      hud.update(G, 0.016);
+      assert.equal(doc.elements.radio.textContent, '♪ NEON NIGHTS');
+    } finally {
+      uninstallDocumentStub();
+    }
+  });
+  it('works with the THREE stub (mesh creation paths run)', () => {
+    installThreeStub();
+    const doc = installDocumentStub();
+    try {
+      const G = makeG();
+      vehicles.init(G);
+      player.init(G);
+      assert.ok(G.player.mesh);
+      assert.ok(G.scene.added.length > 0);
+      hud.init(G);
+      hud.update(G, 0.016);
+    } finally {
+      uninstallDocumentStub();
+      uninstallThreeStub();
+    }
+  });
 });

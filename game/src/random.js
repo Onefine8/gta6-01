@@ -1,6 +1,7 @@
-// Meridian Heat — seeded random number generation.
-// mulberry32: small, fast, deterministic. Same seed => same city, same
-// traffic layout, same screenshot staging. Pure module, no browser globals.
+// Meridian Heat — seeded RNG (mulberry32) + small helpers.
+// Every procedural system (city, traffic, peds, missions) draws from one
+// seeded stream so a given seed always builds the same Port Meridian.
+
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function next() {
@@ -12,53 +13,67 @@ export function mulberry32(seed) {
   };
 }
 
-// Hash a string into a 32-bit seed (FNV-1a), so "?seed=meridian" works too.
-export function hashSeed(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value >>> 0;
-  const s = String(value ?? 'meridian');
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
+export class RNG {
+  constructor(seed) {
+    this.seed = seed >>> 0;
+    this.next = mulberry32(this.seed);
   }
-  return h >>> 0;
+
+  /** Float in [0, 1). */
+  float() { return this.next(); }
+
+  /** Float in [min, max). */
+  range(min, max) { return min + this.next() * (max - min); }
+
+  /** Integer in [min, max] inclusive. */
+  int(min, max) { return Math.floor(this.range(min, max + 1)); }
+
+  /** True with probability p (0..1). */
+  chance(p) { return this.next() < p; }
+
+  /** Random element of an array. */
+  pick(arr) { return arr[Math.floor(this.next() * arr.length)]; }
+
+  /** Random element, removed from the array. */
+  take(arr) { return arr.splice(Math.floor(this.next() * arr.length), 1)[0]; }
+
+  /** In-place Fisher-Yates shuffle; returns the array. */
+  shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(this.next() * (i + 1));
+      const t = arr[i];
+      arr[i] = arr[j];
+      arr[j] = t;
+    }
+    return arr;
+  }
+
+  /** Approximately normal value in [-1, 1] (sum of 3 uniforms). */
+  gaussian() {
+    return (this.next() + this.next() + this.next() - 1.5) / 1.5;
+  }
+
+  /** Random angle in radians. */
+  angle() { return this.next() * Math.PI * 2; }
+
+  /** Random unit vector in the XZ plane. */
+  dir2() {
+    const a = this.angle();
+    return { x: Math.cos(a), z: Math.sin(a) };
+  }
 }
 
-// Create the RNG bundle used everywhere in the game. G.rng is one of these.
-export function createRng(seed) {
-  const seedValue = hashSeed(seed);
-  const next = mulberry32(seedValue);
-  return {
-    seed: seedValue,
-    next,
-    // Float in [min, max).
-    range(min, max) {
-      return min + next() * (max - min);
-    },
-    // Integer in [min, max] inclusive.
-    int(min, max) {
-      return Math.floor(min + next() * (max - min + 1));
-    },
-    // Pick one element of an array.
-    pick(array) {
-      return array[Math.floor(next() * array.length)];
-    },
-    // True with probability p (0..1).
-    chance(p) {
-      return next() < p;
-    },
-    // Shuffle a copy of an array (Fisher-Yates).
-    shuffle(array) {
-      const out = array.slice();
-      for (let i = out.length - 1; i > 0; i--) {
-        const j = Math.floor(next() * (i + 1));
-        const tmp = out[i];
-        out[i] = out[j];
-        out[j] = tmp;
-      }
-      return out;
-    },
-  };
+/** Create an RNG from a numeric or string seed. */
+export function makeRng(seed) {
+  if (typeof seed === 'string') {
+    let h = 2166136261;
+    for (let i = 0; i < seed.length; i++) {
+      h ^= seed.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    seed = h >>> 0;
+  }
+  return new RNG(seed);
 }
 
-export default { mulberry32, hashSeed, createRng };
+export default RNG;

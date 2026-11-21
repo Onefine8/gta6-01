@@ -1,129 +1,157 @@
-// Meridian Heat — configuration constants.
-// Single source of truth for city size, colours, tuning and controls.
-// No browser globals are touched here; this module is pure data.
-export const CONFIG = {
-  // ---- City layout -------------------------------------------------------
-  // 8x8 blocks, block ~60 m, road ~12 m, pitch 72 m between road centrelines.
-  GRID_BLOCKS: 8,
-  BLOCK_SIZE: 60,
-  ROAD_WIDTH: 12,
-  ROAD_PITCH: 72,
-  // Road centrelines run from -288 to +288 on both axes.
-  CITY_HALF: 288,
-  // Water (harbour) starts east of this x; beach strip south of this z.
-  WATER_X: 320,
-  BEACH_Z: 300,
-  WORLD_BOUND: 420,
+// Meridian Heat — configuration & tuning constants.
+// Single source of truth for city size, physics, economy and controls.
+// Gameplay modules read this through G.cfg; they never hard-code tuning.
 
-  // ---- Districts ---------------------------------------------------------
-  // name, centre [x, z], radius, max building height, palette tag.
-  DISTRICTS: [
-    { name: 'Downtown',   cx: 0,    cz: 0,    r: 150, maxHeight: 95, tag: 'downtown' },
-    { name: 'Harbor',     cx: 300,  cz: -40,  r: 120, maxHeight: 26, tag: 'harbor' },
-    { name: 'Old Town',   cx: -190, cz: 150,  r: 130, maxHeight: 30, tag: 'oldtown' },
-    { name: 'Beachfront', cx: 60,   cz: 300,  r: 140, maxHeight: 34, tag: 'beach' },
-    { name: 'Hills',      cx: -200, cz: -190, r: 130, maxHeight: 42, tag: 'hills' },
+export const CFG = {
+  // ---- City layout -------------------------------------------------------
+  CITY: {
+    BLOCKS: 8, // 8 x 8 blocks
+    BLOCK: 60, // metres per block
+    ROAD: 12, // metres of road width
+    // SIZE is derived: BLOCKS*BLOCK + (BLOCKS+1)*ROAD = 588
+    get SIZE() { return this.BLOCKS * this.BLOCK + (this.BLOCKS + 1) * this.ROAD; },
+    get HALF() { return this.SIZE / 2; },
+    get STEP() { return this.BLOCK + this.ROAD; }, // road-centre spacing
+  },
+
+  // ---- Districts (block coords bx,bz in 0..7; bz grows south) ------------
+  DISTRICTS: {
+    DOWNTOWN: { name: 'Downtown', color: 0x2e4a6b, accent: 0x39c5ff },
+    HARBOR: { name: 'Harbor', color: 0x3d5a4a, accent: 0xffb347 },
+    OLD_TOWN: { name: 'Old Town', color: 0x6b4a2e, accent: 0xffd27d },
+    BEACHFRONT: { name: 'Beachfront', color: 0x2e6b6b, accent: 0x7df9ff },
+    HILLS: { name: 'Hills', color: 0x4a6b2e, accent: 0xa8ff7d },
+  },
+
+  // ---- Player on foot -----------------------------------------------------
+  PLAYER: {
+    WALK_SPEED: 6,
+    RUN_SPEED: 10.5,
+    JUMP_VEL: 8.5,
+    GRAVITY: 24,
+    RADIUS: 0.6,
+    HEIGHT: 1.8,
+    HEALTH: 100,
+    PUNCH_DAMAGE: 12,
+  },
+
+  // ---- Vehicles (arcade physics) ------------------------------------------
+  CAR: {
+    ACCEL: 24, // m/s^2 forward
+    BRAKE: 38,
+    REVERSE_ACCEL: 14,
+    MAX_SPEED: 58, // ~209 km/h
+    MAX_REVERSE: 16,
+    STEER: 2.1, // rad/s at full lock, scaled by speed
+    DRAG: 0.55, // 1/s linear drag
+    GRIP: 6.0, // lateral velocity damping
+    RADIUS: 1.6,
+    LENGTH: 4.4,
+    WIDTH: 2.0,
+  },
+
+  // ---- Wanted / police ------------------------------------------------------
+  WANTED: {
+    MAX: 5,
+    DECAY_DELAY: 14, // seconds out of sight before decay starts
+    DECAY_RATE: 0.08, // stars per second once decaying
+    BUST_RADIUS: 2.2, // cop on foot must be this close to bust
+    BUST_TIME: 2.5, // seconds held inside radius to get busted
+    COP_CARS_PER_STAR: 1,
+    COP_FOOT_PER_STAR: 1,
+    SIGHT_RANGE: 55,
+  },
+
+  // ---- Combat ---------------------------------------------------------------
+  COMBAT: {
+    PISTOL_DAMAGE: 34,
+    PISTOL_RATE: 0.28, // seconds between shots
+    PISTOL_RANGE: 60,
+    PISTOL_MAG: 12,
+    SMG_DAMAGE: 18,
+    SMG_RATE: 0.09,
+    SMG_RANGE: 50,
+    SMG_MAG: 30,
+    ENEMY_HEALTH: 60,
+    ENEMY_DAMAGE: 8,
+    ENEMY_RANGE: 38,
+  },
+
+  // ---- Economy ---------------------------------------------------------------
+  ECONOMY: {
+    START_MONEY: 500,
+    MISSION_REWARDS: [800, 1200, 1500, 2000, 2500, 3000, 5000, 10000],
+    TAXI_FARE_BASE: 60,
+    TAXI_FARE_PER_M: 0.9,
+    PACKAGE_REWARD: 250,
+    RACE_REWARD: 1500,
+    CAR_REPAIR_COST: 200,
+  },
+
+  // ---- Missions (names only; logic lives in missions.js) ---------------------
+  MISSIONS: [
+    { id: 1, name: 'First Wheels', brief: 'Steal a car and drive it to Mara\u2019s garage.' },
+    { id: 2, name: 'Courier Run', brief: 'Deliver 3 packages before the timer runs out.' },
+    { id: 3, name: 'Getaway', brief: 'Lose a 2-star wanted level for 60 seconds.' },
+    { id: 4, name: 'Rival Rumble', brief: 'Clear the Kroll gang off the pier.' },
+    { id: 5, name: 'Midnight Race', brief: 'Win the street race: 3 laps, 6 checkpoints.' },
+    { id: 6, name: 'The Pickup', brief: 'Drive Mara to the harbor. Expect an ambush.' },
+    { id: 7, name: 'Harbor Heist', brief: 'Steal the shipment truck and lose 4 stars.' },
+    { id: 8, name: 'King of Meridian', brief: 'Race, chase and shootout at Meridian Tower.' },
   ],
 
-  // ---- Colours -----------------------------------------------------------
-  COLORS: {
-    skyDay: 0x87b5e0,
-    skyDusk: 0xe08a5a,
-    skyNight: 0x0b1026,
-    fogDay: 0x9db8cc,
-    fogNight: 0x0d1428,
-    sunDay: 0xfff2d8,
-    sunNight: 0x8fa8ff,
-    ground: 0x3d4a3a,
-    sidewalk: 0x8d8d8d,
-    road: 0x2b2b30,
-    roadLine: 0xd8c95a,
-    waterDay: 0x1d6f8f,
-    waterNight: 0x0a2438,
-    buildingGlass: 0x9fc4d8,
-    neonPink: 0xff2e88,
-    neonCyan: 0x29e6ff,
-    neonAmber: 0xffb02e,
-    policeBlue: 0x2244ff,
-    policeRed: 0xff2222,
+  // ---- World / ambience ---------------------------------------------------------
+  WORLD: {
+    DAY_LENGTH: 600, // real seconds for a full 24h cycle
+    START_DAY_TIME: 10.5, // 10:30 in the morning
+    SUNRISE: 6,
+    SUNSET: 19.5,
+    NIGHT_START: 20,
+    TRAFFIC_COUNT: 26,
+    PED_COUNT: 40,
+    PACKAGE_COUNT: 20,
+    WATER_LEVEL: -0.5,
+    FOG_DAY: 420,
+    FOG_NIGHT: 260,
   },
 
-  // ---- Time of day -------------------------------------------------------
-  // dayTime is hours in [0, 24). 8 = morning, 13 = noon, 21 = night.
-  DAY_LENGTH_SECONDS: 600, // full 24 h cycle in 10 minutes of play
-  START_DAY_TIME: 10.5,
+  // ---- Radio -----------------------------------------------------------------------
+  RADIO: [
+    { name: 'MERIDIAN FM', genre: 'synthwave', tempo: 112 },
+    { name: 'NEON NIGHTS', genre: 'electro', tempo: 126 },
+    { name: 'HARBOR TALK', genre: 'talk', tempo: 0 },
+    { name: 'OLD TOWN GOLD', genre: 'funk', tempo: 98 },
+  ],
 
-  // ---- Player / vehicle tuning (shared by engine + gameplay) -------------
-  PLAYER: {
-    walkSpeed: 5.2,
-    runSpeed: 9.0,
-    jumpSpeed: 7.5,
-    radius: 0.55,
-    maxHealth: 100,
-  },
-  VEHICLE: {
-    accel: 14,
-    brake: 26,
-    reverseAccel: 8,
-    maxSpeed: 42,
-    maxReverse: 10,
-    steer: 1.9,
-    grip: 6.5,
-    radius: 1.6,
-  },
-  POLICE: {
-    maxWanted: 5,
-    decayDelay: 12, // seconds out of sight before wanted decays
-    bustRadius: 2.2,
-  },
-
-  // ---- Economy -----------------------------------------------------------
-  START_MONEY: 250,
-  MISSION_REWARDS: [500, 800, 1200, 1500, 2000, 2500, 4000, 10000],
-  TAXI_FARE: 120,
-  HIDDEN_PACKAGES: 20,
-
-  // ---- Controls ----------------------------------------------------------
+  // ---- Controls -----------------------------------------------------------------------
   KEYS: {
-    forward: 'KeyW',
-    back: 'KeyS',
-    left: 'KeyA',
-    right: 'KeyD',
-    run: 'ShiftLeft',
-    jump: 'Space',
-    enterVehicle: 'KeyE',
-    shoot: 'Mouse0',
-    pause: 'Escape',
-    radio: 'KeyR',
-    horn: 'KeyH',
-    camera: 'KeyC',
-    reload: 'KeyR',
+    FORWARD: 'KeyW',
+    BACK: 'KeyS',
+    LEFT: 'KeyA',
+    RIGHT: 'KeyD',
+    RUN: 'ShiftLeft',
+    JUMP: 'Space',
+    ENTER_CAR: 'KeyE',
+    ATTACK: 'Mouse0',
+    RELOAD: 'KeyR',
+    WEAPON_NEXT: 'KeyQ',
+    PAUSE: 'Escape',
+    RADIO_NEXT: 'KeyC',
+    HORN: 'KeyH',
+    CAMERA: 'KeyV',
+    MISSION_MENU: 'KeyM',
+    SPRINT_CAR: 'ShiftLeft',
   },
 
-  // ---- Rendering ---------------------------------------------------------
-  CAMERA: {
-    followDistance: 11,
-    followHeight: 6.5,
-    lookAhead: 6,
-    orbitDistance: 260,
-    orbitHeight: 170,
-    fov: 62,
+  // ---- UI ------------------------------------------------------------------------------
+  UI: {
+    MINIMAP_SIZE: 180,
+    MINIMAP_RANGE: 320, // metres shown across the minimap
+    MESSAGE_TIME: 4, // seconds a banner stays up
   },
-  FOG_NEAR: 90,
-  FOG_FAR_DAY: 620,
-  FOG_FAR_NIGHT: 380,
 
-  // ---- Persistence -------------------------------------------------------
   SAVE_KEY: 'meridian-heat-save-v1',
-  AUTOSAVE_SECONDS: 60,
-
-  // ---- Screenshot presets ------------------------------------------------
-  SHOTS: {
-    chase:   { seed: 7, dayTime: 15.0, wanted: 2 },
-    walk:    { seed: 7, dayTime: 11.0, wanted: 0 },
-    mission: { seed: 7, dayTime: 13.5, wanted: 0 },
-    night:   { seed: 7, dayTime: 21.5, wanted: 1 },
-  },
+  DEFAULT_SEED: 7,
 };
 
-export default CONFIG;
+export default CFG;

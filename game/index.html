@@ -8,85 +8,103 @@
 <script src="vendor/three.min.js"></script>
 </head>
 <body>
-<!-- ======================= HUD (in-game overlay) ======================= -->
+<canvas id="game-canvas"></canvas>
+
+<!-- ============ HUD (contract: Builder B fills these via hud.js) ============ -->
 <div id="hud" class="hidden">
   <div id="hud-top-left">
-    <div id="health-wrap" title="Health">
-      <div id="health-bar"></div>
+    <div id="health-wrap">
+      <span class="hud-label">HEALTH</span>
+      <div id="health-bar-outer"><div id="health-bar"></div></div>
       <span id="health-num">100</span>
     </div>
-    <div id="money">$250</div>
-    <div id="stars" title="Wanted level">☆☆☆☆☆</div>
+    <div id="money-wrap">
+      <span class="hud-label">CASH</span>
+      <span id="money">$500</span>
+    </div>
+    <div id="stars" class="stars">☆☆☆☆☆</div>
   </div>
 
   <div id="hud-top-right">
     <canvas id="minimap" width="180" height="180"></canvas>
-    <div id="radio">MERIDIAN FM</div>
+    <div id="district">Downtown</div>
+    <div id="clock">10:30</div>
   </div>
 
   <div id="hud-bottom-left">
-    <div id="objective">Welcome to Port Meridian</div>
+    <div id="objective">Welcome to Port Meridian.</div>
     <div id="mission-tracker"></div>
   </div>
 
   <div id="hud-bottom-right">
     <div id="speed">0 km/h</div>
-    <div id="controls-hint">WASD drive / walk &middot; E enter car &middot; Space jump &middot; Shift run &middot; R radio &middot; Esc pause</div>
+    <div id="radio">MERIDIAN FM</div>
+    <div id="weapon">PISTOL · 12</div>
   </div>
 
   <div id="message" class="hidden"></div>
   <div id="wanted-flash" class="hidden"></div>
 </div>
 
-<!-- ======================= Start screen ======================= -->
-<div id="menu">
-  <div class="menu-inner">
-    <h1 class="game-title">MERIDIAN<br>HEAT</h1>
-    <p class="tagline">Port Meridian &mdash; drive it, steal it, own it.</p>
-    <p class="story-blurb">
-      Rook is a getaway driver with no crew and one fixer: Mara Voss.
-      Dante Kroll owns the harbor &mdash; and he wants Rook gone.
-      Eight jobs stand between Rook and the top of Port Meridian.
-    </p>
+<!-- ============ Start screen ============ -->
+<div id="menu" class="overlay">
+  <div class="menu-panel">
+    <h1 class="title">MERIDIAN<br><span>HEAT</span></h1>
+    <p class="subtitle">Port Meridian — an open-world crime story</p>
+    <p class="tagline">Rook needs a car. Mara needs a driver. Dante Kroll needs a lesson.</p>
     <div class="menu-buttons">
-      <button id="start-button" class="btn primary">▶ New Game</button>
-      <button id="continue-button" class="btn hidden">Continue</button>
-      <button id="mute-button" class="btn">🔊 Sound: On</button>
+      <button id="btn-start" class="btn primary">▶ New Game</button>
+      <button id="btn-continue" class="btn hidden">↻ Continue</button>
+      <button id="btn-howto" class="btn">? How to Play</button>
     </div>
-    <div class="how-to">
-      <h2>How to play</h2>
-      <ul>
-        <li><b>WASD</b> &mdash; walk / drive &nbsp; <b>Shift</b> &mdash; run &nbsp; <b>Space</b> &mdash; jump</li>
-        <li><b>E</b> &mdash; steal / enter a car &nbsp; <b>Mouse</b> &mdash; aim &amp; shoot (click to fire)</li>
-        <li><b>R</b> &mdash; radio &nbsp; <b>H</b> &mdash; horn &nbsp; <b>C</b> &mdash; camera &nbsp; <b>Esc</b> &mdash; pause</li>
-        <li>Follow the waypoint. Lose the cops. Finish all 8 missions.</li>
-      </ul>
+    <div id="howto" class="hidden">
+      <h2>How to Play</h2>
+      <table>
+        <tr><td>W A S D</td><td>Move / drive</td></tr>
+        <tr><td>Shift</td><td>Run / boost</td></tr>
+        <tr><td>Space</td><td>Jump (on foot)</td></tr>
+        <tr><td>E</td><td>Steal / enter / exit car</td></tr>
+        <tr><td>Mouse</td><td>Aim / orbit camera (click to lock)</td></tr>
+        <tr><td>Click</td><td>Shoot (when armed)</td></tr>
+        <tr><td>R</td><td>Reload</td></tr>
+        <tr><td>Q</td><td>Switch weapon</td></tr>
+        <tr><td>C</td><td>Next radio station</td></tr>
+        <tr><td>H</td><td>Horn</td></tr>
+        <tr><td>V</td><td>Camera view</td></tr>
+        <tr><td>M</td><td>Mission list</td></tr>
+        <tr><td>Esc</td><td>Pause</td></tr>
+      </table>
+      <p>Steal cars, outrun the Meridian PD, finish all 8 story missions,
+      and become King of Meridian. Lose the cops to drop your wanted level.
+      Getting busted or wasted costs $200.</p>
     </div>
-    <p class="footnote">An original open-world crime game. All characters, places and story are fictional.</p>
+    <p class="foot">A fan-made original. Not affiliated with Rockstar Games.</p>
   </div>
 </div>
 
-<!-- ======================= Pause menu ======================= -->
-<div id="pause-menu" class="hidden">
-  <div class="menu-inner">
-    <h1 class="game-title small">PAUSED</h1>
-    <p class="tagline">Port Meridian waits for no one. Except now.</p>
+<!-- ============ Pause menu ============ -->
+<div id="pause-menu" class="overlay hidden">
+  <div class="menu-panel small">
+    <h1 class="title small">PAUSED</h1>
     <div class="menu-buttons">
-      <button id="resume-button" class="btn primary">Resume</button>
-      <button id="restart-button" class="btn">Restart</button>
-      <button id="quit-button" class="btn">Quit to Menu</button>
+      <button id="btn-resume" class="btn primary">▶ Resume</button>
+      <button id="btn-save" class="btn">💾 Save Game</button>
+      <button id="btn-restart" class="btn">↻ Restart Story</button>
+      <button id="btn-quit" class="btn">■ Quit to Menu</button>
     </div>
+    <p id="save-note" class="note"></p>
+    <button id="btn-mute" class="btn ghost">🔊 Sound: On</button>
   </div>
 </div>
 
-<!-- ======================= Busted / Wasted ======================= -->
-<div id="end-screen" class="hidden">
-  <div class="menu-inner">
-    <h1 id="end-title" class="game-title small">BUSTED!</h1>
-    <p id="end-subtitle" class="tagline">The Meridian PD caught up with Rook.</p>
+<!-- ============ Busted / Wasted ============ -->
+<div id="end-screen" class="overlay hidden">
+  <div class="menu-panel small">
+    <h1 id="end-title" class="title danger">BUSTED</h1>
+    <p id="end-sub" class="tagline"></p>
     <div class="menu-buttons">
-      <button id="retry-button" class="btn primary">Retry</button>
-      <button id="end-menu-button" class="btn">Main Menu</button>
+      <button id="btn-retry" class="btn primary">↻ Try Again</button>
+      <button id="btn-end-menu" class="btn">■ Main Menu</button>
     </div>
   </div>
 </div>

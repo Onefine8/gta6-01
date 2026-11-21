@@ -1,24 +1,46 @@
-// hud.js — the HUD: health bar, cash, wanted stars, speed, objective line,
-// center banner, mission tracker, and the 180x180 minimap canvas (roads,
-// player arrow, cops, mission waypoint, packages). Owns G.hud. All DOM
-// access is guarded so the math stays testable in Node.
+// hud.js — the heads-up display: bars, stars, money, minimap, banners.
+//
+// Owns G.hud. All DOM access goes through cached element handles looked up
+// once in init(); when `document` does not exist (Node tests) the module
+// still runs — every write is guarded and the pure formatters plus the
+// minimap math stay testable. The minimap draws roads, the player, police,
+// the mission waypoint and enemies onto #minimap (180x180 canvas).
+// Element ids follow the HUD contract in the spec.
 
-import * as configModule from './config.js';
-import * as randomModule from './random.js';
+export const MINIMAP_SIZE = 180;
 
-const CFG = configModule.CONFIG ?? configModule.default ?? {};
-const mulberry32 = randomModule.mulberry32 ?? randomModule.default ?? null;
-
-// ---------------------------------------------------------------- helpers
-
-function cfg(G, key, fallback) {
-  const c = G.cfg ?? CFG;
-  const v = c == null ? undefined : c[key];
-  return v === undefined || v === null ? fallback : v;
+export function formatMoney(n) {
+  const v = Math.round(n ?? 0);
+  return '$' + v.toLocaleString('en-US');
 }
 
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
+export function starsText(level) {
+  const filled = '★'.repeat(Math.max(0, Math.min(5, level)));
+  const empty = '☆'.repeat(5 - filled.length);
+  return filled + empty;
+}
+
+export function speedText(kmh) {
+  return `${Math.round(kmh)} km/h`;
+}
+
+export function healthPct(health, max) {
+  return Math.max(0, Math.min(100, ((health ?? 0) / (max || 100)) * 100));
+}
+
+// World (x, z) -> minimap pixel, given bounds. y grows downwards.
+// Bounds may be a scalar half-extent (Builder A's world.bounds = 294)
+// or a {minX, maxX, minZ, maxZ} object.
+export function worldToMap(x, z, bounds, size) {
+  const b = typeof bounds === 'number'
+    ? { minX: -bounds, maxX: bounds, minZ: -bounds, maxZ: bounds + 130 }
+    : (bounds ?? { minX: -294, maxX: 294, minZ: -294, maxZ: 424 });
+  const w = b.maxX - b.minX;
+  const h = b.maxZ - b.minZ;
+  return {
+    x: ((x - b.minX) / w) * size,
+    y: ((z - b.minZ) / h) * size,
+  };
 }
 
 function el(id) {
@@ -26,396 +48,267 @@ function el(id) {
   return document.getElementById(id);
 }
 
-// ---------------------------------------------------------------- pure math (tested)
-
-/** Format cash as $1,234. Pure. */
-export function formatMoney(n) {
-  const v = Math.max(0, Math.floor(n ?? 0));
-  return `$${v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+function setText(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
 }
 
-/** Format a countdown in seconds as M:SS. Pure. */
-export function formatTimer(seconds) {
-  const s = Math.max(0, Math.ceil(seconds ?? 0));
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${r.toString().padStart(2, '0')}`;
+export function objectiveFor(G) {
+  const ms = G.missions;
+  if (!ms) return 'Explore Port Meridian';
+  const m = ms.active;
+  if (!m) {
+    const done = ms.done instanceof Set ? ms.done.size : 0;
+    if (done >= 8) return 'King of Meridian. The city is yours.';
+    // Name the next job, like missions.currentObjective does.
+    const next = done + 1;
+    const titles = ['First Wheels', 'Courier Run', 'Getaway', 'Rival Rumble',
+      'Midnight Race', 'The Pickup', 'Harbor Heist', 'King of Meridian'];
+    if (next >= 1 && next <= 8) {
+      return `Next job: ${titles[next - 1]} — open the menu (Esc) to start`;
+    }
+    return 'Open the menu (Esc) to start the next job';
+  }
+  try {
+    return m.def.objective(G, m);
+  } catch {
+    return 'Mission in progress';
+  }
 }
 
-/** Speed in km/h from m/s. Pure. */
-export function kmh(ms) {
-  return Math.round((ms ?? 0) * 3.6);
+export function drawMinimap(ctx, G, size) {
+  if (!ctx) return;
+  const s = size ?? MINIMAP_SIZE;
+  const bounds = (G.world && G.world.bounds) ?? 294;
+  const to = (x, z) => worldToMap(x, z, bounds, s);
+
+  ctx.clearRect(0, 0, s, s);
+  ctx.fillStyle = '#0e1a24';
+  ctx.fillRect(0, 0, s, s);
+
+  // Roads (raw form {axis, x1, z1, x2, z2} or {ax, az, bx, bz} segments).
+  ctx.strokeStyle = '#4a5a68';
+  ctx.lineWidth = 2;
+  const roads = (G.world && G.world.roads) || [];
+  for (const r of roads) {
+    const a = to(r.ax ?? r.x1, r.az ?? r.z1);
+    const b = to(r.bx ?? r.x2, r.bz ?? r.z2);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+
+  // Mission waypoint.
+  const wp = G.missions && G.missions.active && G.missions.active.data.waypoint;
+  if (wp) {
+    const p = to(wp.x, wp.z);
+    ctx.fillStyle = '#ffd34d';
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - 6);
+    ctx.lineTo(p.x + 5, p.y);
+    ctx.lineTo(p.x, p.y + 6);
+    ctx.lineTo(p.x - 5, p.y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Enemies (red), traffic (grey), police (blue).
+  const dot = (x, z, color, r) => {
+    const p = to(x, z);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  for (const e of (G.combat && G.combat.enemies) || []) {
+    if (e.alive) dot(e.pos.x, e.pos.z, '#ff4d4d', 2.5);
+  }
+  for (const v of (G.traffic && G.traffic.cars) || []) {
+    dot(v.pos.x, v.pos.z, '#9aa5ad', 1.8);
+  }
+  for (const v of (G.police && G.police.cars) || []) {
+    dot(v.pos.x, v.pos.z, '#4d7dff', 2.5);
+  }
+
+  // Player: white triangle pointing along the heading.
+  const p = G.player;
+  if (p) {
+    const pt = to(p.pos.x, p.pos.z);
+    const h = p.heading ?? 0;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(pt.x + Math.sin(h) * 6, pt.y - Math.cos(h) * 6);
+    ctx.lineTo(pt.x + Math.sin(h + 2.5) * 5, pt.y - Math.cos(h + 2.5) * 5);
+    ctx.lineTo(pt.x + Math.sin(h - 2.5) * 5, pt.y - Math.cos(h - 2.5) * 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
 }
 
-/**
- * Project a world (x, z) point onto the minimap: map is `size` px square,
- * `half` is the city half-extent in metres, north is up. Pure.
- */
-export function worldToMap(x, z, size, half) {
-  const s = size / (half * 2);
-  return { x: size / 2 + x * s, y: size / 2 + z * s };
+// --- banner / flashes ----------------------------------------------------
+
+export function showMessage(G, text, duration) {
+  const h = G.hud;
+  if (!h) return;
+  h.message = { text, until: (G.time ? G.time.t : 0) + (duration ?? 4) };
+  setText(h.els.message, text);
+  if (h.els.message) h.els.message.style.opacity = '1';
 }
 
-/** Star string: filled stars for wanted, empty for the rest. Pure. */
-export function starsString(wanted) {
-  let s = '';
-  for (let i = 0; i < 5; i++) s += i < wanted ? '★' : '☆';
-  return s;
+export function flashWanted(G) {
+  const h = G.hud;
+  if (!h) return;
+  h.wantedFlashUntil = (G.time ? G.time.t : 0) + 0.6;
 }
 
-/** Health bar colour by fraction. Pure. */
-export function healthColor(frac) {
-  if (frac > 0.5) return '#4fc94f';
-  if (frac > 0.25) return '#ffb347';
-  return '#ff4f4f';
+export function flashDamage(G) {
+  const h = G.hud;
+  if (!h) return;
+  h.damageFlashUntil = (G.time ? G.time.t : 0) + 0.35;
 }
 
-// ---------------------------------------------------------------- module
+// Set a one-off objective line (shots.js staging). It wins over the
+// computed objective for `duration` seconds, then the game takes over.
+export function setObjective(G, text, duration) {
+  const h = G.hud;
+  if (!h) return;
+  h.objectiveOverride = { text, until: (G.time ? G.time.t : 0) + (duration ?? 30) };
+  setText(h.els.objective, text);
+}
+
+// --- lifecycle -----------------------------------------------------------
 
 export function init(G) {
+  const minimap = el('minimap');
+  // Replace the (frozen) module namespace on G with the live hud object:
+  // cached element handles plus update() and the helpers other modules
+  // call (showMessage / flashWanted / flashDamage / setObjective).
   G.hud = {
-    els: {},
-    bannerTimer: 0,
-    bannerQueue: [],
-    flashTimer: 0,
-    _lastObjective: '',
-    _lastTracker: '',
-
-    /** Grab the HUD elements by id (spec contract). Safe to call again. */
-    bind() {
-      const ids = [
-        'hud', 'health-bar', 'health-num', 'money', 'stars', 'speed',
-        'objective', 'message', 'radio', 'minimap', 'menu', 'pause-menu',
-        'end-screen', 'mission-tracker', 'wanted-flash',
-      ];
-      for (const id of ids) G.hud.els[id] = el(id);
-      return G.hud.els;
+    els: {
+      root: el('hud'),
+      healthBar: el('health-bar'),
+      healthNum: el('health-num'),
+      money: el('money'),
+      stars: el('stars'),
+      speed: el('speed'),
+      objective: el('objective'),
+      message: el('message'),
+      radio: el('radio'),
+      minimap,
+      menu: el('menu'),
+      pauseMenu: el('pause-menu'),
+      endScreen: el('end-screen'),
+      tracker: el('mission-tracker'),
+      wantedFlash: el('wanted-flash'),
+      weapon: el('weapon'),
+      district: el('district'),
+      clock: el('clock'),
     },
-
-    /** Show a center banner message for `seconds` (queues when busy). */
-    banner(text, seconds) {
-      if (!text) return;
-      G.hud.bannerQueue.push({ text, seconds: seconds ?? 4 });
-      if (G.hud.bannerTimer <= 0) G.hud._nextBanner();
-    },
-
-    /** Alias used by main.js and shots.js for one-off messages. */
-    showMessage(text) {
-      G.hud.banner(text, 4);
-    },
-
-    _nextBanner() {
-      const next = G.hud.bannerQueue.shift();
-      const m = G.hud.els.message;
-      if (!next) {
-        if (m) {
-          m.textContent = '';
-          m.classList?.add?.('hidden');
-        }
-        G.hud.bannerTimer = 0;
-        return;
-      }
-      if (m) {
-        m.textContent = next.text;
-        m.classList?.remove?.('hidden');
-        m.style.opacity = '1';
-      }
-      G.hud.bannerTimer = next.seconds;
-    },
-
-    /** Red flash over the screen when the wanted level jumps. */
-    flashWanted() {
-      const f = G.hud.els['wanted-flash'];
-      if (f) {
-        f.classList?.remove?.('hidden');
-        f.style.opacity = '0.55';
-        G.hud.flashTimer = 0.5;
-      }
-    },
-
-    /** Show or hide the start screen (matches main.js 'hidden' class use). */
-    showMenu(show) {
-      const menu = G.hud.els.menu;
-      const hud = G.hud.els.hud;
-      if (menu) menu.classList?.toggle?.('hidden', !show);
-      if (hud) hud.classList?.toggle?.('hidden', show);
-    },
-
-    /** Show or hide the pause menu. */
-    showPause(show) {
-      const pm = G.hud.els['pause-menu'];
-      if (pm) pm.classList?.toggle?.('hidden', !show);
-    },
-
-    /** Show or hide the end screen (mission 8 complete = victory text). */
-    showEnd(show) {
-      const end = G.hud.els['end-screen'];
-      if (!end) return;
-      end.classList?.toggle?.('hidden', !show);
-      if (show) {
-        const title = typeof document !== 'undefined'
-          ? document.getElementById('end-title') : null;
-        const sub = typeof document !== 'undefined'
-          ? document.getElementById('end-subtitle') : null;
-        const money = G.player?.money ?? 0;
-        const done = G.missions?.completed?.length ?? 0;
-        if (title) title.textContent = 'KING OF MERIDIAN';
-        if (sub) {
-          sub.textContent = `You beat Dante Kroll and took the city. `
-            + `Missions ${done}/8 — Cash ${formatMoney(money)}. Port Meridian is yours, Rook.`;
-        }
-        // "Retry" makes no sense on the victory screen.
-        const retry = typeof document !== 'undefined'
-          ? document.getElementById('retry-button') : null;
-        if (retry) retry.style.display = 'none';
-      }
-    },
-
-    /** Write the objective line (only when it changed). */
-    setObjective(text) {
-      if (text === G.hud._lastObjective) return;
-      G.hud._lastObjective = text;
-      const o = G.hud.els.objective;
-      if (o) o.textContent = text;
-    },
-
-    /** Write the mission tracker list (only when it changed). */
-    setTracker(lines) {
-      const joined = (lines ?? []).join('\n');
-      if (joined === G.hud._lastTracker) return;
-      G.hud._lastTracker = joined;
-      const t = G.hud.els['mission-tracker'];
-      if (t) {
-        t.innerHTML = (lines ?? [])
-          .map((l) => `<div>${escapeHtml(l)}</div>`)
-          .join('');
-      }
-    },
+    ctx: minimap && typeof minimap.getContext === 'function' ? minimap.getContext('2d') : null,
+    message: null,
+    objectiveOverride: null,
+    wantedFlashUntil: 0,
+    damageFlashUntil: 0,
+    lastTracker: '',
+    update,
+    showMessage: (text, duration) => showMessage(G, text, duration),
+    flashWanted: () => flashWanted(G),
+    flashDamage: () => flashDamage(G),
+    setObjective: (text, duration) => setObjective(G, text, duration),
   };
-
-  G.hud.bind();
-
-  // Start button on the menu (if the page has one) begins the game.
-  try {
-    const startBtn = typeof document !== 'undefined'
-      ? document.querySelector('[data-start]')
-      : null;
-    if (startBtn) {
-      startBtn.addEventListener('click', () => {
-        try {
-          G.events?.emit?.('start-game');
-        } catch (e) { /* best-effort */ }
-      });
-    }
-  } catch (e) { /* best-effort */ }
-
   return G.hud;
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 export function update(G, dt) {
   const h = G.hud;
   if (!h) return;
-  dt = Math.min(dt, 0.05);
-
-  // Banner queue.
-  if (h.bannerTimer > 0) {
-    h.bannerTimer -= dt;
-    if (h.bannerTimer <= 0) h._nextBanner();
-  }
-  if (h.flashTimer > 0) {
-    h.flashTimer -= dt;
-    const f = h.els['wanted-flash'];
-    if (f) f.style.opacity = String(Math.max(0, h.flashTimer * 1.1));
-    if (h.flashTimer <= 0 && f) {
-      f.style.opacity = '0';
-      f.classList?.add?.('hidden');
-    }
-  }
-
-  if (G.state !== 'playing') return;
+  void dt;
+  const now = G.time ? G.time.t : 0;
   const p = G.player;
-  if (!p) return;
+  const pol = G.police;
 
-  // Health.
-  const frac = clamp(p.health / p.maxHealth, 0, 1);
-  const bar = h.els['health-bar'];
-  if (bar) {
-    bar.style.width = `${Math.round(frac * 100)}%`;
-    bar.style.background = healthColor(frac);
-  }
-  const hn = h.els['health-num'];
-  if (hn) hn.textContent = String(Math.ceil(p.health));
-
-  // Cash.
-  const money = h.els.money;
-  if (money) money.textContent = formatMoney(p.money);
-
-  // Wanted stars.
-  const stars = h.els.stars;
-  if (stars) {
-    const w = G.police?.wanted ?? 0;
-    stars.textContent = starsString(w);
-    stars.style.color = w >= 3 ? '#ff4f4f' : '#ffd23f';
-  }
-
-  // Speed.
-  const speed = h.els.speed;
-  if (speed) {
-    const veh = p.inVehicle ? p.vehicle : null;
-    const v = veh ? Math.abs(veh.speed) : Math.abs(p.speed ?? 0);
-    speed.textContent = veh ? `${kmh(v)} km/h` : '';
-  }
-
-  // Objective + tracker from the active mission.
-  const m = G.missions?.current;
-  if (m) {
-    const timer = m.timerMax > 0 ? `  [${formatTimer(m.timer)}]` : '';
-    h.setObjective(`${m.name}${timer} — ${m.objectives?.[0] ?? ''}`);
-    h.setTracker(m.objectives ?? []);
-  } else {
-    const next = G.missions?.nextAvailable?.();
-    if (next) {
-      const def = G.missions.defs.find((d) => d.id === next);
-      h.setObjective(`Next mission: ${def ? def.name : ''} — press M for the mission list`);
-    } else {
-      h.setObjective('Port Meridian is yours. Free roam — taxi fares, races and packages pay.');
-    }
-    const acts = G.activities;
-    const lines = [];
-    if (acts) {
-      lines.push(`Packages: ${acts.packagesFound ?? 0}/20`);
-      lines.push(`Taxi fares done: ${acts.taxiDone ?? 0}`);
-      lines.push(`Races won: ${acts.racesWon ?? 0}/3`);
-    }
-    h.setTracker(lines);
-  }
-
-  // Radio station label.
-  const radio = h.els.radio;
-  if (radio && G.audio) {
-    try {
-      radio.textContent = G.audio.isRadioOn?.()
-        ? `♪ ${G.audio.currentStation()}` : '';
-    } catch (e) { /* best-effort */ }
-  }
-
-  drawMinimap(G);
-}
-
-// ---------------------------------------------------------------- minimap
-
-function drawMinimap(G) {
-  const canvas = G.hud.els.minimap;
-  if (!canvas || typeof canvas.getContext !== 'function') return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const size = 180;
-  const half = cfg(G, 'CITY_HALF', 290);
-  const toMap = (x, z) => worldToMap(x, z, size, half);
-
-  // Background.
-  ctx.fillStyle = '#10151d';
-  ctx.fillRect(0, 0, size, size);
-
-  // Roads.
-  const roads = G.world?.roads ?? G._fallbackRoads ?? [];
-  ctx.strokeStyle = '#3a4552';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  for (const r of roads) {
-    const a = toMap(r.ax, r.az);
-    const b = toMap(r.bx, r.bz);
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-  }
-  ctx.stroke();
-
-  // Water: harbor on the east edge.
-  ctx.fillStyle = '#123a52';
-  ctx.fillRect(size - 14, 0, 14, size);
-
-  // Hidden packages (only the unfound ones, faint).
-  const acts = G.activities;
-  if (acts?.packages) {
-    ctx.fillStyle = '#ffd23f';
-    for (const pkg of acts.packages) {
-      if (pkg.found) continue;
-      const q = toMap(pkg.x, pkg.z);
-      ctx.fillRect(q.x - 1, q.y - 1, 2, 2);
-    }
-  }
-
-  // Mission waypoint: pulsing yellow diamond.
-  const m = G.missions?.current;
-  if (m?.waypoint) {
-    const q = toMap(m.waypoint.x, m.waypoint.z);
-    const pulse = 3 + Math.sin((G.time?.t ?? 0) * 5) * 1.5;
-    ctx.fillStyle = '#ffd23f';
-    ctx.beginPath();
-    ctx.moveTo(q.x, q.y - pulse - 2);
-    ctx.lineTo(q.x + pulse, q.y);
-    ctx.lineTo(q.x, q.y + pulse + 2);
-    ctx.lineTo(q.x - pulse, q.y);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // Taxi passenger / fare destination.
-  if (acts?.taxi?.active && acts.taxi.destination) {
-    const q = toMap(acts.taxi.destination.x, acts.taxi.destination.z);
-    ctx.fillStyle = '#4fc9e8';
-    ctx.beginPath();
-    ctx.arc(q.x, q.y, 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Police: red dots.
-  ctx.fillStyle = '#ff4f4f';
-  for (const cop of G.police?.cops ?? []) {
-    const v = cop.vehicle;
-    if (!v) continue;
-    const q = toMap(v.pos.x, v.pos.z);
-    ctx.beginPath();
-    ctx.arc(q.x, q.y, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Enemies: orange dots.
-  ctx.fillStyle = '#ff9a3f';
-  for (const e of G.combat?.enemies ?? []) {
-    const q = toMap(e.pos.x, e.pos.z);
-    ctx.fillRect(q.x - 1.5, q.y - 1.5, 3, 3);
-  }
-
-  // Player: white arrow, rotated to the heading.
-  const p = G.player;
+  // Money and health are canonical on G (main.js / save.js own them).
+  const hp = typeof G.health === 'number' ? G.health : (p ? p.health : 100);
+  const pct = healthPct(hp, 100);
+  if (h.els.healthBar) h.els.healthBar.style.width = `${pct}%`;
+  setText(h.els.healthNum, `${Math.ceil(hp)}`);
+  setText(h.els.money, formatMoney(typeof G.money === 'number' ? G.money : 0));
   if (p) {
-    const pos = p.inVehicle && p.vehicle ? p.vehicle.pos : p.pos;
-    if (!pos) return;
-    const heading = p.inVehicle && p.vehicle ? p.vehicle.heading : p.heading;
-    const q = toMap(pos.x, pos.z);
-    ctx.save();
-    ctx.translate(q.x, q.y);
-    ctx.rotate(-heading);
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(0, -6);
-    ctx.lineTo(4, 5);
-    ctx.lineTo(-4, 5);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
+    const pv = G.vehicles ? G.vehicles.playerVehicle : null;
+    const kmh = pv ? Math.abs(pv.speed ?? 0) * 3.6 : 0;
+    setText(h.els.speed, p.onFoot ? 'On foot' : speedText(kmh));
+  }
+  if (pol) setText(h.els.stars, starsText(pol.wanted));
+
+  if (h.objectiveOverride && now < h.objectiveOverride.until) {
+    setText(h.els.objective, h.objectiveOverride.text);
+  } else {
+    h.objectiveOverride = null;
+    setText(h.els.objective, objectiveFor(G));
   }
 
-  // Border.
-  ctx.strokeStyle = '#5a6b7a';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(1, 1, size - 2, size - 2);
+  // Radio station name (G.audio.station is an index into CFG.RADIO).
+  if (G.audio) {
+    const st = G.audio.station;
+    let name = '';
+    if (typeof st === 'number' && G.cfg && Array.isArray(G.cfg.RADIO)) {
+      name = (G.cfg.RADIO[st] && G.cfg.RADIO[st].name) || '';
+    } else if (typeof st === 'string') {
+      name = st;
+    }
+    setText(h.els.radio, name ? `♪ ${name}` : '');
+  }
+
+  // Weapon + district + clock flavour lines (ids exist in index.html).
+  if (G.combat) {
+    const w = (G.combat.tuning?.weapons ?? {})[G.combat.weapon];
+    setText(h.els.weapon, w ? `${w.name} — ${G.combat.ammo}/${w.mag}` : '');
+  }
+  if (p && G.world && typeof G.world.districtAt === 'function') {
+    setText(h.els.district, G.world.districtAt(p.pos.x, p.pos.z));
+  }
+  if (G.time) {
+    const hh = Math.floor(G.time.dayTime ?? 0) % 24;
+    const mm = Math.floor(((G.time.dayTime ?? 0) % 1) * 60);
+    setText(h.els.clock, `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`);
+  }
+
+  // Mission tracker: one line per mission, done / current / locked.
+  if (h.els.tracker && G.missions) {
+    const titles = ['First Wheels', 'Courier Run', 'Getaway', 'Rival Rumble',
+      'Midnight Race', 'The Pickup', 'Harbor Heist', 'King of Meridian'];
+    const done = G.missions.done instanceof Set ? G.missions.done : new Set();
+    const lines = titles.map((title, i) => {
+      const num = i + 1;
+      const isDone = done.has(num);
+      const current = G.missions.current === num;
+      const mark = isDone ? '✓' : current ? '▶' : '·';
+      return `${mark} ${title}`;
+    });
+    const text = lines.join('\n');
+    if (text !== h.lastTracker) {
+      h.lastTracker = text;
+      setText(h.els.tracker, text);
+    }
+  }
+
+  // Banner expiry.
+  if (h.message && now > h.message.until) {
+    h.message = null;
+    if (h.els.message) h.els.message.style.opacity = '0';
+  }
+
+  // Wanted flash overlay.
+  if (h.els.wantedFlash) {
+    const on = pol && pol.wanted > 0 && now < h.wantedFlashUntil;
+    h.els.wantedFlash.style.opacity = on ? '1' : '0';
+  }
+  if (h.els.root) {
+    h.els.root.classList.toggle('hurt', now < h.damageFlashUntil);
+  }
+
+  drawMinimap(h.ctx, G, MINIMAP_SIZE);
 }
